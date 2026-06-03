@@ -6,7 +6,7 @@
  * { "targetActorId": "user/another-actor", "chargeEventName": "my-event", "skipDestructive": true }
  */
 
-import { Actor } from 'scrapely';
+import { Actor, Configuration } from 'scrapely';
 
 /** Apify-compatible instance (options env vars override at runtime on platform). */
 const smokeActor = new Actor({ persistStateIntervalMillis: 60_000 });
@@ -53,25 +53,57 @@ await Actor.main(async () => {
 
     await check('new Actor(options) constructor', async () => smokeActor instanceof Actor);
 
-    await check('instance.configuration', async () => {
-        const cfg = smokeActor.configuration;
+    await check('instance.config', async () => {
+        const cfg = smokeActor.config;
         return typeof cfg.get === 'function';
     });
 
-    await check('Actor.configuration (static)', async () => {
-        const cfg = Actor.configuration;
+    await check('Actor.getDefaultInstance().config', async () => {
+        const cfg = Actor.getDefaultInstance().config;
+        return typeof cfg.get('persistStateIntervalMillis') === 'number';
+    });
+
+    await check('Configuration.getGlobalConfig()', async () => {
+        const global = Configuration.getGlobalConfig();
+        const instance = Actor.getDefaultInstance().config;
         return (
-            cfg === smokeActor.configuration &&
-            typeof cfg.get('persistStateIntervalMillis') === 'number'
+            global.get('actorRunId') === instance.get('actorRunId') &&
+            global.get('defaultDatasetId') === instance.get('defaultDatasetId')
         );
     });
 
-    await check('Actor.getDefaultInstance().configuration', async () => {
-        return Actor.getDefaultInstance().configuration === Actor.configuration;
+    await check('config.get(token)', async () => {
+        const token = Actor.getDefaultInstance().config.get('token');
+        const fromEnv = process.env.APIFY_TOKEN || process.env.SCRAPELY_TOKEN;
+        if (fromEnv && token !== fromEnv) {
+            return { ok: false, token, fromEnv };
+        }
+        return { token: token ?? null };
     });
 
-    await check('Actor.config removed (use Actor.configuration)', async () => {
-        return !Object.prototype.hasOwnProperty.call(Actor, 'config');
+    await check('config.get(actorRunId)', async () => {
+        const runId = Actor.getDefaultInstance().config.get('actorRunId');
+        if (process.env.ACTOR_RUN_ID && runId !== process.env.ACTOR_RUN_ID) {
+            return { ok: false, runId, env: process.env.ACTOR_RUN_ID };
+        }
+        return { actorRunId: runId ?? null };
+    });
+
+    await check('config platform keys', async () => {
+        const cfg = Actor.getDefaultInstance().config;
+        return {
+            actorId: cfg.get('actorId') ?? null,
+            defaultDatasetId: cfg.get('defaultDatasetId'),
+            inputKey: cfg.get('inputKey'),
+            isAtHome: cfg.get('isAtHome'),
+            containerPort: cfg.get('containerPort'),
+            containerUrl: cfg.get('containerUrl') ?? null,
+        };
+    });
+
+    await check('new Actor({ token }) isolated config', async () => {
+        const isolated = new Actor({ token: 'test-token' });
+        return isolated.config.get('token') === 'test-token';
     });
 
     await check('Actor.isStandby', async () => typeof Actor.isStandby() === 'boolean');
@@ -84,20 +116,22 @@ await Actor.main(async () => {
         };
     });
 
-    await check('CRAWLEE env bridges', async () => {
-        const bridges: Record<string, string | undefined> = {
-            CRAWLEE_DEFAULT_DATASET_ID: process.env.CRAWLEE_DEFAULT_DATASET_ID,
-            CRAWLEE_INPUT_KEY: process.env.CRAWLEE_INPUT_KEY,
-            CRAWLEE_HEADLESS: process.env.CRAWLEE_HEADLESS,
-            CRAWLEE_PURGE_ON_START: process.env.CRAWLEE_PURGE_ON_START,
-        };
-        if (process.env.ACTOR_DEFAULT_DATASET_ID && !bridges.CRAWLEE_DEFAULT_DATASET_ID) {
-            return { ok: false, reason: 'dataset id not bridged' };
+    await check('config ENV_MAP (no CRAWLEE bridge required)', async () => {
+        const cfg = Actor.getDefaultInstance().config;
+        if (process.env.ACTOR_DEFAULT_DATASET_ID) {
+            const id = cfg.get('defaultDatasetId');
+            if (id !== process.env.ACTOR_DEFAULT_DATASET_ID) {
+                return { ok: false, reason: 'defaultDatasetId mismatch', id, env: process.env.ACTOR_DEFAULT_DATASET_ID };
+            }
         }
-        if (process.env.ACTOR_INPUT_KEY && bridges.CRAWLEE_INPUT_KEY !== process.env.ACTOR_INPUT_KEY) {
-            return { ok: false, reason: 'input key not bridged', bridges };
+        if (process.env.APIFY_PERSIST_STATE_INTERVAL_MILLIS) {
+            const ms = cfg.get('persistStateIntervalMillis');
+            const expected = parseInt(process.env.APIFY_PERSIST_STATE_INTERVAL_MILLIS, 10);
+            if (ms !== expected) {
+                return { ok: false, reason: 'persistStateIntervalMillis mismatch', ms, expected };
+            }
         }
-        return { ok: true, bridges };
+        return { ok: true };
     }, false);
 
     await check('Actor.getEnv', async () => {
