@@ -41,6 +41,8 @@ interface SmokeInput {
     abortTargetRunId?: string;
     /** When skipDestructive is false, use graceful abort (default true). */
     abortGracefully?: boolean;
+    /** URL for Actor.addWebhook smoke (default https://example.com/webhook). */
+    webhookRequestUrl?: string;
 }
 
 const results: SmokeCheck[] = [];
@@ -391,14 +393,39 @@ await Actor.main(async () => {
         await skip('Actor.callTask', 'no targetTaskId in input');
     }
 
-    await check('Actor.addWebhook', async () => {
-        const webhook = await Actor.addWebhook({
-            eventTypes: ['ACTOR.RUN.SUCCEEDED'],
-            requestUrl: 'https://example.com/webhook',
-            description: 'sdk-smoke',
+    if (!Actor.isAtHome()) {
+        await skip('Actor.addWebhook', 'not running on platform');
+    } else {
+        await check('Actor.addWebhook', async () => {
+            const requestUrl = input.webhookRequestUrl ?? 'https://example.com/webhook';
+            const webhook = await Actor.addWebhook({
+                eventTypes: ['ACTOR.RUN.SUCCEEDED'],
+                requestUrl,
+                description: 'sdk-smoke',
+                idempotencyKey: currentRunId ?? undefined,
+            });
+            if (!webhook?.id) {
+                return { ok: false, reason: 'no webhook id returned' };
+            }
+            if (webhook.isAdHoc !== true) {
+                return { ok: false, isAdHoc: webhook.isAdHoc };
+            }
+            const runCondition = webhook.condition as { actorRunId?: string } | undefined;
+            if (runCondition?.actorRunId !== currentRunId) {
+                return {
+                    ok: false,
+                    expectedRunId: currentRunId,
+                    condition: runCondition,
+                };
+            }
+            return {
+                ok: true,
+                id: webhook.id,
+                isAdHoc: webhook.isAdHoc,
+                actorRunId: runCondition.actorRunId,
+            };
         });
-        return webhook ?? 'skipped';
-    }, false);
+    }
 
     if (input.skipDestructive !== false) {
         await skip('Actor.metamorph', 'skipDestructive=true');
