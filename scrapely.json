@@ -1,0 +1,8 @@
+{
+  "name": "sdk-smoke-actor",
+  "version": "1.0.0",
+  "entrypoint": "main.ts",
+  "maxMemory": 512,
+  "maxTimeout": 600,
+  "description": "Platform integration smoke test for the Scrapely Actor SDK"
+}

@@ -1,0 +1,17 @@
+{
+  "name": "sdk-smoke-actor",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Exercises Scrapely Actor SDK methods on the platform",
+  "main": "main.ts",
+  "scripts": {
+    "start": "npx tsx main.ts"
+  },
+  "dependencies": {
+    "scrapely": "file:../.."
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0",
+    "typescript": "^5.7.0"
+  }
+}
