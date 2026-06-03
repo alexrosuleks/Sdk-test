@@ -25,6 +25,8 @@ interface SmokeInput {
     targetTaskId?: string;
     chargeEventName?: string;
     skipDestructive?: boolean;
+    /** Key for Actor.useState persist/restore smoke (default sdk-smoke-state). */
+    useStateKey?: string;
 }
 
 const results: SmokeCheck[] = [];
@@ -49,7 +51,9 @@ async function skip(method: string, reason: string): Promise<void> {
 await Actor.main(async () => {
     const input = (await Actor.getInput<SmokeInput>()) ?? {};
 
-    await check('Actor.init (via main)', async () => Actor.initialized);
+    await check('Actor.init (via main)', async () => {
+        return smokeActor.initialized && Actor.getDefaultInstance().initialized;
+    });
 
     await check('new Actor(options) constructor', async () => smokeActor instanceof Actor);
 
@@ -151,13 +155,41 @@ await Actor.main(async () => {
 
     await check('Actor.buildTags getter', async () => Actor.buildTags);
 
-    await check('Actor.getInput', async () => input);
+    await check('Actor.getInput', async () => {
+        const fromGetInput = await Actor.getInput<SmokeInput>();
+        if (fromGetInput === null || fromGetInput === undefined) {
+            return { ok: false, reason: 'getInput returned null' };
+        }
+        if (typeof fromGetInput !== 'object' || Array.isArray(fromGetInput)) {
+            return { ok: false, reason: 'expected object input on platform' };
+        }
+        return {
+            hasObject: true,
+            skipDestructive: fromGetInput.skipDestructive ?? null,
+            useStateKey: fromGetInput.useStateKey ?? null,
+        };
+    });
 
-    await check('Actor.input getter', async () => Actor.input);
+    await check('Actor.input getter', async () => {
+        const sync = Actor.input;
+        if (sync && typeof sync === 'object' && !Array.isArray(sync)) {
+            return { viaGetter: true, keys: Object.keys(sync) };
+        }
+        return { viaGetter: sync ?? null };
+    });
 
     await check('Actor.getInputOrThrow', async () => {
         const value = await Actor.getInputOrThrow<SmokeInput>();
-        return value !== null;
+        if (value === null || value === undefined) {
+            throw new Error('getInputOrThrow returned null');
+        }
+        return { ok: true, type: typeof value };
+    });
+
+    await check('Actor.getInput matches getInputOrThrow', async () => {
+        const a = await Actor.getInput<SmokeInput>();
+        const b = await Actor.getInputOrThrow<SmokeInput>();
+        return JSON.stringify(a) === JSON.stringify(b);
     });
 
     await check('Actor.setValue / getValue', async () => {
@@ -188,18 +220,47 @@ await Actor.main(async () => {
         return !!queue;
     });
 
-    await check('Actor.useState', async () => {
-        const state = await Actor.useState('sdk-smoke-state', { count: 0 });
+    const useStateKey = input.useStateKey ?? 'sdk-smoke-state';
+
+    await check('Actor.useState (mutate)', async () => {
+        const state = await Actor.useState(useStateKey, { count: 0, probe: 'useState' });
         state.count = (state.count ?? 0) + 1;
-        return state.count;
+        return { count: state.count, probe: state.probe };
     });
+
+    await check('Actor.useState (persistState)', async () => {
+        const state = await Actor.useState(useStateKey, { count: 0, saved: false });
+        state.count = 99;
+        state.saved = true;
+
+        const eventManager = Actor.getDefaultInstance().config.getEventManager();
+        eventManager.emit('persistState', { isMigrating: false });
+        await new Promise((r) => setTimeout(r, 300));
+
+        const restored = await Actor.useState(useStateKey, { count: 0, saved: false });
+        if (restored.count !== 99) {
+            return { ok: false, count: restored.count, saved: restored.saved };
+        }
+        if (restored.saved !== true) {
+            return { ok: false, reason: 'saved flag not persisted', saved: restored.saved };
+        }
+        return { count: restored.count, saved: restored.saved };
+    });
+
+    await check('Actor.useState (default key APIFY_GLOBAL_STATE)', async () => {
+        const globalState = await Actor.useState(undefined, { marker: 'global' });
+        globalState.marker = 'ok';
+        return globalState.marker;
+    }, false);
 
     let persistStateFired = false;
     Actor.on('persistState', () => {
         persistStateFired = true;
     });
-    Actor.events.emit('persistState', { isMigrating: false });
-    await check('Actor.on / Actor.events', async () => persistStateFired);
+    Actor.getDefaultInstance().config.getEventManager().emit('persistState', {
+        isMigrating: false,
+    });
+    await check('Actor.on (EventManager persistState)', async () => persistStateFired);
 
     await check('Actor.newClient', async () => {
         const client = Actor.newClient();
