@@ -3,7 +3,17 @@
  * Each check is recorded in the default dataset; the run fails if any required check fails.
  *
  * Run on platform with input, e.g.:
- * { "targetActorId": "user/another-actor", "chargeEventName": "my-event", "skipDestructive": true }
+ * {
+ *   "targetActorId": "user/another-actor",
+ *   "chargeEventName": "my-event",
+ *   "useStateKey": "sdk-smoke-state",
+ *   "skipDestructive": false,
+ *   "abortTargetRunId": "<id-of-another-running-run>"
+ * }
+ *
+ * Abort smoke: set skipDestructive to false. By default the smoke run aborts itself
+ * after OUTPUT is written (current run id from config/env). Optional abortTargetRunId
+ * aborts another run instead.
  */
 
 import { Actor, Configuration } from 'scrapely';
@@ -27,6 +37,10 @@ interface SmokeInput {
     skipDestructive?: boolean;
     /** Key for Actor.useState persist/restore smoke (default sdk-smoke-state). */
     useStateKey?: string;
+    /** Another run to abort when skipDestructive is false; default is this run after OUTPUT. */
+    abortTargetRunId?: string;
+    /** When skipDestructive is false, use graceful abort (default true). */
+    abortGracefully?: boolean;
 }
 
 const results: SmokeCheck[] = [];
@@ -34,6 +48,9 @@ const results: SmokeCheck[] = [];
 async function check(method: string, fn: () => Promise<unknown>, required = true): Promise<void> {
     try {
         const detail = await fn();
+        if (detail === false) {
+            throw new Error('check returned false');
+        }
         results.push({ method, status: 'ok', detail });
     } catch (err) {
         const error = (err as Error).message;
@@ -51,9 +68,24 @@ async function skip(method: string, reason: string): Promise<void> {
 await Actor.main(async () => {
     const input = (await Actor.getInput<SmokeInput>()) ?? {};
 
+    const currentRunId =
+        Actor.getDefaultInstance().config.get('actorRunId') ??
+        process.env.ACTOR_RUN_ID ??
+        null;
+
     await check('Actor.init (via main)', async () => {
         return smokeActor.initialized && Actor.getDefaultInstance().initialized;
     });
+
+    await check('Actor.currentRunId', async () => ({
+        currentRunId,
+        fromConfig: Actor.getDefaultInstance().config.get('actorRunId') ?? null,
+        fromEnv: process.env.ACTOR_RUN_ID ?? null,
+    }));
+
+    if (currentRunId) {
+        await Actor.setValue('SDK_SMOKE_RUN_ID', { currentRunId, input });
+    }
 
     await check('new Actor(options) constructor', async () => smokeActor instanceof Actor);
 
@@ -165,8 +197,11 @@ await Actor.main(async () => {
         }
         return {
             hasObject: true,
+            keys: Object.keys(fromGetInput),
+            currentRunId,
             skipDestructive: fromGetInput.skipDestructive ?? null,
             useStateKey: fromGetInput.useStateKey ?? null,
+            abortTargetRunId: fromGetInput.abortTargetRunId ?? null,
         };
     });
 
@@ -360,9 +395,14 @@ await Actor.main(async () => {
         await skip('Actor.metamorph', 'skipDestructive=true');
         await skip('Actor.reboot', 'skipDestructive=true');
         await skip('Actor.abort', 'skipDestructive=true');
+    } else {
+        await skip('Actor.metamorph', 'destructive — not implemented in smoke');
+        await skip('Actor.reboot', 'destructive — not implemented in smoke');
+        await skip('Actor.abort', 'runs at end after OUTPUT (see abortAtEnd in summary)');
     }
 
-    const summary = {
+    const summary: Record<string, unknown> = {
+        currentRunId,
         passed: results.filter((r) => r.status === 'ok').length,
         failed: results.filter((r) => r.status === 'fail').length,
         skipped: results.filter((r) => r.status === 'skip').length,
@@ -378,4 +418,40 @@ await Actor.main(async () => {
     }
 
     console.log('[sdk-smoke] All required checks passed', summary);
+
+    // Abort after OUTPUT is persisted (self by default, or abortTargetRunId).
+    if (input.skipDestructive === false) {
+        const abortRunId = input.abortTargetRunId ?? currentRunId;
+        if (!abortRunId) {
+            summary.abortAtEnd = { status: 'skip', reason: 'no currentRunId or abortTargetRunId' };
+            await Actor.setValue('OUTPUT', summary);
+            return;
+        }
+
+        const gracefully = input.abortGracefully !== false;
+        try {
+            const run = await Actor.abort(abortRunId, {
+                gracefully,
+                statusMessage: 'SDK smoke test finished',
+            });
+            summary.abortAtEnd = {
+                status: 'ok',
+                runId: abortRunId,
+                gracefully,
+                runStatus: run?.status ?? null,
+            };
+            console.log('[sdk-smoke] Abort at end', summary.abortAtEnd);
+        } catch (err) {
+            summary.abortAtEnd = {
+                status: 'fail',
+                runId: abortRunId,
+                error: (err as Error).message,
+            };
+            console.error('[sdk-smoke] Abort at end failed', summary.abortAtEnd);
+            await Actor.setValue('OUTPUT', summary);
+            throw err;
+        }
+
+        await Actor.setValue('OUTPUT', summary);
+    }
 });
