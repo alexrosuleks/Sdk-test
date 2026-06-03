@@ -320,8 +320,17 @@ await Actor.main(async () => {
     }
 
     await check('Actor.setStatusMessage', async () => {
-        const run = await Actor.setStatusMessage('SDK smoke test running');
-        return run?.status ?? 'updated';
+        const msg = 'SDK smoke test running';
+        const run = await Actor.setStatusMessage(msg);
+        if (run?.statusMessage !== msg) {
+            return {
+                ok: false,
+                expected: msg,
+                statusMessage: run?.statusMessage ?? null,
+                runId: run?.id ?? null,
+            };
+        }
+        return { ok: true, statusMessage: run.statusMessage, id: run.id ?? null };
     });
 
     await check('Actor.getChargingManager', async () => {
