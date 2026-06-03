@@ -53,6 +53,14 @@ async function check(method: string, fn: () => Promise<unknown>, required = true
         if (detail === false) {
             throw new Error('check returned false');
         }
+        if (
+            detail &&
+            typeof detail === 'object' &&
+            !Array.isArray(detail) &&
+            (detail as { ok?: boolean }).ok === false
+        ) {
+            throw new Error(`check returned ok: false (${JSON.stringify(detail)})`);
+        }
         results.push({ method, status: 'ok', detail });
     } catch (err) {
         const error = (err as Error).message;
@@ -139,9 +147,27 @@ await Actor.main(async () => {
         };
     });
 
-    await check('new Actor({ token }) isolated config', async () => {
-        const isolated = new Actor({ token: 'test-token' });
-        return isolated.config.get('token') === 'test-token';
+    await check('new Actor(options) separate Configuration', async () => {
+        const global = Actor.getDefaultInstance().config;
+        const isolated = new Actor({ persistStateIntervalMillis: 60_000 });
+
+        if (isolated.config === global) {
+            return false;
+        }
+
+        const envToken = process.env.APIFY_TOKEN || process.env.SCRAPELY_TOKEN;
+        if (envToken) {
+            if (isolated.config.get('token') !== envToken) {
+                return false;
+            }
+            return { separateConfig: true, tokenFromEnv: true };
+        }
+
+        const withCtorToken = new Actor({ token: 'test-token' });
+        if (withCtorToken.config === global || withCtorToken.config.get('token') !== 'test-token') {
+            return false;
+        }
+        return { separateConfig: true, constructorToken: true };
     });
 
     await check('Actor.isStandby', async () => typeof Actor.isStandby() === 'boolean');
