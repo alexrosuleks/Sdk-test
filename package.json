@@ -8,7 +8,7 @@
     "start": "npx tsx main.ts"
   },
   "dependencies": {
-    "scrapely": "file:../.."
+    "scrapely": "file:../scrapely"
   },
   "devDependencies": {
     "tsx": "^4.7.0",

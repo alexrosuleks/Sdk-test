@@ -8,6 +8,9 @@
 
 import { Actor } from 'scrapely';
 
+/** Apify-compatible instance (options env vars override at runtime on platform). */
+const smokeActor = new Actor({ persistStateIntervalMillis: 60_000 });
+
 type CheckStatus = 'ok' | 'fail' | 'skip';
 
 interface SmokeCheck {
@@ -47,6 +50,55 @@ await Actor.main(async () => {
     const input = (await Actor.getInput<SmokeInput>()) ?? {};
 
     await check('Actor.init (via main)', async () => Actor.initialized);
+
+    await check('new Actor(options) constructor', async () => smokeActor instanceof Actor);
+
+    await check('instance.configuration', async () => {
+        const cfg = smokeActor.configuration;
+        return typeof cfg.get === 'function';
+    });
+
+    await check('Actor.configuration (static)', async () => {
+        const cfg = Actor.configuration;
+        return (
+            cfg === smokeActor.configuration &&
+            typeof cfg.get('persistStateIntervalMillis') === 'number'
+        );
+    });
+
+    await check('Actor.getDefaultInstance().configuration', async () => {
+        return Actor.getDefaultInstance().configuration === Actor.configuration;
+    });
+
+    await check('Actor.config removed (use Actor.configuration)', async () => {
+        return !Object.prototype.hasOwnProperty.call(Actor, 'config');
+    });
+
+    await check('Actor.isStandby', async () => typeof Actor.isStandby() === 'boolean');
+
+    await check('Actor.standbyPort / webServerPort getters', async () => {
+        return {
+            standbyPort: Actor.standbyPort,
+            webServerPort: Actor.webServerPort,
+            containerPort: Actor.containerPort,
+        };
+    });
+
+    await check('CRAWLEE env bridges', async () => {
+        const bridges: Record<string, string | undefined> = {
+            CRAWLEE_DEFAULT_DATASET_ID: process.env.CRAWLEE_DEFAULT_DATASET_ID,
+            CRAWLEE_INPUT_KEY: process.env.CRAWLEE_INPUT_KEY,
+            CRAWLEE_HEADLESS: process.env.CRAWLEE_HEADLESS,
+            CRAWLEE_PURGE_ON_START: process.env.CRAWLEE_PURGE_ON_START,
+        };
+        if (process.env.ACTOR_DEFAULT_DATASET_ID && !bridges.CRAWLEE_DEFAULT_DATASET_ID) {
+            return { ok: false, reason: 'dataset id not bridged' };
+        }
+        if (process.env.ACTOR_INPUT_KEY && bridges.CRAWLEE_INPUT_KEY !== process.env.ACTOR_INPUT_KEY) {
+            return { ok: false, reason: 'input key not bridged', bridges };
+        }
+        return { ok: true, bridges };
+    }, false);
 
     await check('Actor.getEnv', async () => {
         const env = Actor.getEnv();
@@ -172,7 +224,7 @@ await Actor.main(async () => {
         await check(
             'Actor.start',
             async () => {
-                const run = await Actor.start(input.targetActorId!, { smoke: true });
+                const run = await Actor.start(input.targetActorId!, {});
                 return run?.id ?? run;
             },
             false,
