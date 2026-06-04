@@ -5,6 +5,7 @@
  * Run on platform with input, e.g.:
  * {
  *   "targetActorId": "user/another-actor",
+ *   "targetTaskId": "user/some-task",
  *   "chargeEventName": "my-event",
  *   "useStateKey": "sdk-smoke-state",
  *   "skipDestructive": false,
@@ -366,17 +367,43 @@ await Actor.main(async () => {
         return manager.getPricingInfo();
     });
 
-    if (input.chargeEventName) {
-        await check(
-            'Actor.charge',
-            async () => Actor.charge({ eventName: input.chargeEventName!, count: 1 }),
-            false,
-        );
+    await check('smokeActor.charge (instance method)', async () => typeof smokeActor.charge === 'function');
+
+    const chargePricing = Actor.getChargingManager().getPricingInfo();
+    if (input.chargeEventName && chargePricing.isPayPerEvent) {
+        await check('Actor.charge', async () => {
+            const result = await Actor.charge({ eventName: input.chargeEventName!, count: 1 });
+            if (typeof result.chargedCount !== 'number') {
+                return { ok: false, reason: 'missing chargedCount' };
+            }
+            if (result.chargedCount < 0 || result.chargedCount > 1) {
+                return {
+                    ok: false,
+                    reason: 'unexpected chargedCount for count=1',
+                    chargedCount: result.chargedCount,
+                };
+            }
+            return {
+                ok: true,
+                chargedCount: result.chargedCount,
+                eventChargeLimitReached: result.eventChargeLimitReached,
+                chargeableWithinLimit: result.chargeableWithinLimit,
+            };
+        });
         await check(
             'Actor.pushData with eventName',
-            async () => Actor.pushData({ charged: true }, input.chargeEventName),
+            async () => {
+                const result = await Actor.pushData({ charged: true }, input.chargeEventName);
+                return {
+                    chargedCount: result.chargedCount,
+                    eventChargeLimitReached: result.eventChargeLimitReached,
+                };
+            },
             false,
         );
+    } else if (input.chargeEventName) {
+        await skip('Actor.charge', 'chargeEventName set but actor is not pay-per-event');
+        await skip('Actor.pushData(eventName)', 'chargeEventName set but actor is not pay-per-event');
     } else {
         await skip('Actor.charge', 'no chargeEventName in input');
         await skip('Actor.pushData(eventName)', 'no chargeEventName in input');
@@ -400,9 +427,66 @@ await Actor.main(async () => {
         await skip('Actor.start', 'no targetActorId in input');
     }
 
+    await check('smokeActor.call (instance method)', async () => typeof smokeActor.call === 'function');
+
+    await check('instance.call delegates to Actor.call', async () => {
+        const savedTimeoutAt = process.env.ACTOR_TIMEOUT_AT;
+        const warnings: string[] = [];
+        const origWarn = console.warn;
+        console.warn = (...args: unknown[]) => {
+            warnings.push(args.map(String).join(' '));
+            origWarn.apply(console, args as Parameters<typeof console.warn>);
+        };
+        try {
+            delete process.env.ACTOR_TIMEOUT_AT;
+            try {
+                await smokeActor.call('sdk-smoke-inherit-probe/nonexistent-actor', {}, {
+                    timeout: 'inherit',
+                    waitSecs: 1,
+                });
+            } catch {
+                // API error expected for fake actor id
+            }
+            const warnedWithoutEnv = warnings.some((w) => w.includes('inherit'));
+            if (!warnedWithoutEnv) {
+                return false;
+            }
+
+            if (savedTimeoutAt) {
+                process.env.ACTOR_TIMEOUT_AT = savedTimeoutAt;
+                warnings.length = 0;
+                try {
+                    await smokeActor.call('sdk-smoke-inherit-probe/nonexistent-actor', {}, {
+                        timeout: 'inherit',
+                        waitSecs: 1,
+                    });
+                } catch {
+                    // API error expected
+                }
+                if (warnings.some((w) => w.includes('inherit') && w.includes('ACTOR_TIMEOUT_AT'))) {
+                    return false;
+                }
+                return {
+                    warnedWithoutEnv: true,
+                    silentWithEnv: true,
+                    remainingMs: Actor.getRemainingTime(),
+                };
+            }
+
+            return { warnedWithoutEnv: true };
+        } finally {
+            console.warn = origWarn;
+            if (savedTimeoutAt !== undefined) {
+                process.env.ACTOR_TIMEOUT_AT = savedTimeoutAt;
+            } else {
+                delete process.env.ACTOR_TIMEOUT_AT;
+            }
+        }
+    });
+
     if (input.targetActorId) {
         await check(
-            'Actor.call timeout inherit',
+            'Actor.call timeout inherit (remaining time)',
             async () => {
                 const remaining = Actor.getRemainingTime();
                 return { remainingMs: remaining };
@@ -413,8 +497,79 @@ await Actor.main(async () => {
         await skip('Actor.call', 'no targetActorId in input');
     }
 
+    await check('smokeActor.callTask (instance method)', async () => typeof smokeActor.callTask === 'function');
+
+    await check('instance.callTask delegates to Actor.callTask', async () => {
+        const savedTimeoutAt = process.env.ACTOR_TIMEOUT_AT;
+        const warnings: string[] = [];
+        const origWarn = console.warn;
+        console.warn = (...args: unknown[]) => {
+            warnings.push(args.map(String).join(' '));
+            origWarn.apply(console, args as Parameters<typeof console.warn>);
+        };
+        try {
+            delete process.env.ACTOR_TIMEOUT_AT;
+            try {
+                await smokeActor.callTask('sdk-smoke-inherit-probe/nonexistent-task', {}, {
+                    timeout: 'inherit',
+                    waitSecs: 1,
+                });
+            } catch {
+                // API error expected for fake task id
+            }
+            const warnedWithoutEnv = warnings.some((w) => w.includes('inherit'));
+            if (!warnedWithoutEnv) {
+                return false;
+            }
+
+            if (savedTimeoutAt) {
+                process.env.ACTOR_TIMEOUT_AT = savedTimeoutAt;
+                warnings.length = 0;
+                try {
+                    await smokeActor.callTask('sdk-smoke-inherit-probe/nonexistent-task', {}, {
+                        timeout: 'inherit',
+                        waitSecs: 1,
+                    });
+                } catch {
+                    // API error expected
+                }
+                if (warnings.some((w) => w.includes('inherit') && w.includes('ACTOR_TIMEOUT_AT'))) {
+                    return false;
+                }
+                return {
+                    warnedWithoutEnv: true,
+                    silentWithEnv: true,
+                    remainingMs: Actor.getRemainingTime(),
+                };
+            }
+
+            return { warnedWithoutEnv: true };
+        } finally {
+            console.warn = origWarn;
+            if (savedTimeoutAt !== undefined) {
+                process.env.ACTOR_TIMEOUT_AT = savedTimeoutAt;
+            } else {
+                delete process.env.ACTOR_TIMEOUT_AT;
+            }
+        }
+    });
+
     if (input.targetTaskId) {
-        await skip('Actor.callTask', 'callTask requires valid task on platform');
+        await check(
+            'Actor.callTask',
+            async () => {
+                const run = await smokeActor.callTask(
+                    input.targetTaskId!,
+                    { sdkSmoke: true },
+                    { waitSecs: 300 },
+                );
+                if (!run?.id) {
+                    return { ok: false, reason: 'no run id returned' };
+                }
+                return { id: run.id, status: run.status ?? null };
+            },
+            false,
+        );
     } else {
         await skip('Actor.callTask', 'no targetTaskId in input');
     }
