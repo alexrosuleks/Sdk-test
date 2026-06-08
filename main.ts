@@ -48,6 +48,72 @@ interface SmokeInput {
 
 const results: SmokeCheck[] = [];
 
+/** Carries structured failure detail into the checks array and run logs. */
+class SmokeCheckError extends Error {
+    constructor(
+        message: string,
+        readonly detail?: unknown,
+    ) {
+        super(message);
+        this.name = 'SmokeCheckError';
+    }
+}
+
+/** Fields exposed by apify-client ApifyApiError (duck-typed, no direct import). */
+function apifyApiErrorFields(err: unknown): Record<string, unknown> | null {
+    if (!err || typeof err !== 'object') return null;
+    const e = err as Record<string, unknown>;
+    if (typeof e.statusCode !== 'number' && typeof e.type !== 'string') return null;
+    return {
+        name: e.name,
+        message: e.message,
+        type: e.type,
+        statusCode: e.statusCode,
+        path: e.path,
+        clientMethod: e.clientMethod,
+        httpMethod: e.httpMethod,
+    };
+}
+
+function tokenPrefix(envName: string): string | null {
+    const value = process.env[envName];
+    if (!value) return null;
+    return `${value.slice(0, 12)}… (${value.length} chars)`;
+}
+
+/** Snapshot of which API host Actor.apifyClient is pointed at (for Actor.start debugging). */
+function apiRoutingSnapshot() {
+    const cfg = Actor.getDefaultInstance().config;
+    const client = Actor.apifyClient as { baseUrl?: string; publicBaseUrl?: string };
+    return {
+        configApiBaseUrl: cfg.get('apiBaseUrl') ?? null,
+        configApiPublicBaseUrl: cfg.get('apiPublicBaseUrl') ?? null,
+        apifyClientBaseUrl: client.baseUrl ?? null,
+        apifyClientPublicBaseUrl: client.publicBaseUrl ?? null,
+        env: {
+            APIFY_API_BASE_URL: process.env.APIFY_API_BASE_URL ?? null,
+            SCRAPELY_API_URL: process.env.SCRAPELY_API_URL ?? null,
+            APIFY_TOKEN: tokenPrefix('APIFY_TOKEN'),
+            SCRAPELY_TOKEN: tokenPrefix('SCRAPELY_TOKEN'),
+        },
+        actorId: cfg.get('actorId') ?? null,
+    };
+}
+
+function actorStartRequestPreview(targetActorId: string, baseUrl: string | null) {
+    // apify-client _toSafeId: replaces only the first '/'
+    const safeId = targetActorId.replace('/', '~');
+    const root = baseUrl?.replace(/\/v2$/, '') ?? '(unknown-base)';
+    return {
+        targetActorId,
+        safeId,
+        expectedPostPath: `/v2/acts/${safeId}/runs`,
+        expectedFullUrl: `${root}/v2/acts/${safeId}/runs`,
+        scrapelyRuns404Message: 'Actor was not found',
+        note: 'If error message embeds the actor id (e.g. "Actor actors/… not found"), it likely did not come from scrapely runs.ts',
+    };
+}
+
 async function check(method: string, fn: () => Promise<unknown>, required = true): Promise<void> {
     try {
         const detail = await fn();
@@ -65,7 +131,13 @@ async function check(method: string, fn: () => Promise<unknown>, required = true
         results.push({ method, status: 'ok', detail });
     } catch (err) {
         const error = (err as Error).message;
-        results.push({ method, status: 'fail', error });
+        const detail =
+            err instanceof SmokeCheckError
+                ? err.detail
+                : apifyApiErrorFields(err) ?? undefined;
+        const entry: SmokeCheck = { method, status: 'fail', error };
+        if (detail !== undefined) entry.detail = detail;
+        results.push(entry);
         if (required) {
             throw new Error(`${method} failed: ${error}`);
         }
@@ -415,16 +487,41 @@ await Actor.main(async () => {
     });
 
     if (input.targetActorId) {
+        const routing = apiRoutingSnapshot();
+        const startPreview = actorStartRequestPreview(
+            input.targetActorId,
+            routing.apifyClientBaseUrl,
+        );
+        const startDiagnostics = { routing, startPreview };
+
+        console.log('[sdk-smoke] Actor.start diagnostics', JSON.stringify(startDiagnostics, null, 2));
+
+        await check('API routing (Actor.start diagnostics)', async () => startDiagnostics, false);
+
         await check(
             'Actor.start',
             async () => {
-                const run = await Actor.start(input.targetActorId!, {});
-                return run?.id ?? run;
+                try {
+                    const run = await Actor.start(input.targetActorId!, {});
+                    return {
+                        runId: run?.id ?? null,
+                        status: run?.status ?? null,
+                        ...startPreview,
+                    };
+                } catch (err) {
+                    const payload = {
+                        ...startDiagnostics,
+                        apiError: apifyApiErrorFields(err),
+                    };
+                    console.error('[sdk-smoke] Actor.start failed', JSON.stringify(payload, null, 2));
+                    throw new SmokeCheckError((err as Error).message, payload);
+                }
             },
             false,
         );
     } else {
         await skip('Actor.start', 'no targetActorId in input');
+        await skip('API routing (Actor.start diagnostics)', 'no targetActorId in input');
     }
 
     await check('smokeActor.call (instance method)', async () => typeof smokeActor.call === 'function');
