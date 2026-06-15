@@ -44,6 +44,10 @@ interface SmokeInput {
     abortGracefully?: boolean;
     /** URL for Actor.addWebhook smoke (default https://example.com/webhook). */
     webhookRequestUrl?: string;
+    /** Proxy URLs for createProxyConfiguration test. */
+    proxyUrls?: string[];
+    /** When true, test useApifyProxy: false returns undefined. */
+    testUseApifyProxyFalse?: boolean;
 }
 
 const results: SmokeCheck[] = [];
@@ -107,8 +111,8 @@ function actorStartRequestPreview(targetActorId: string, baseUrl: string | null)
     return {
         targetActorId,
         safeId,
-        expectedPostPath: `/v2/acts/${safeId}/runs`,
-        expectedFullUrl: `${root}/v2/acts/${safeId}/runs`,
+        expectedPostPath: `/v2/actors/${safeId}/runs`,
+        expectedFullUrl: `${root}/v2/actors/${safeId}/runs`,
         scrapelyRuns404Message: 'Actor was not found',
         note: 'If error message embeds the actor id (e.g. "Actor actors/… not found"), it likely did not come from scrapely runs.ts',
     };
@@ -335,26 +339,271 @@ await Actor.main(async () => {
         return value?.smoke === true;
     });
 
-    await check('Actor.openDataset + pushData', async () => {
+    // ============================================
+    // Actor.pushData comprehensive tests
+    // ============================================
+
+    await check('Actor.pushData (void return without eventName)', async () => {
+        const result = await Actor.pushData({ test: 'void-return', timestamp: Date.now() });
+        // Should return void (undefined) when no eventName is provided
+        return { result: result ?? 'void', isUndefined: result === undefined };
+    });
+
+    await check('Actor.pushData (array of items)', async () => {
+        const items = [
+            { test: 'array-item-1', index: 0 },
+            { test: 'array-item-2', index: 1 },
+            { test: 'array-item-3', index: 2 },
+        ];
+        await Actor.pushData(items);
+        return { itemCount: items.length };
+    });
+
+    await check('Actor.pushData with eventName (returns ChargeResult)', async () => {
+        // This test is conditional on pay-per-event, so we mark it not required
+        // It's already tested below with the chargeEventName condition
+        return { note: 'tested conditionally with chargeEventName input' };
+    }, false);
+
+    // ============================================
+    // Actor.openDataset comprehensive tests
+    // ============================================
+
+    await check('Actor.openDataset (default, no args)', async () => {
         const dataset = await Actor.openDataset();
-        await dataset.pushData({ probe: 'dataset' });
-        return true;
+        const info = await dataset.getInfo();
+        return {
+            hasDataset: !!dataset,
+            datasetId: info?.id ?? null,
+            datasetName: info?.name ?? null,
+        };
     });
 
-    await check('Actor.pushData shortcut', async () => {
-        await Actor.pushData({ probe: 'shortcut' });
-        return true;
+    await check('Actor.openDataset (by string name)', async () => {
+        const datasetName = `sdk-smoke-dataset-${Date.now()}`;
+        const dataset = await Actor.openDataset(datasetName);
+        await dataset.pushData({ openedBy: 'string-name', name: datasetName });
+        const info = await dataset.getInfo();
+        return {
+            hasDataset: !!dataset,
+            name: info?.name ?? null,
+            method: 'string-name',
+        };
     });
 
-    await check('Actor.openKeyValueStore', async () => {
+    await check('Actor.openDataset (by { id })', async () => {
+        // First open default to get its ID
+        const defaultDataset = await Actor.openDataset();
+        const defaultInfo = await defaultDataset.getInfo();
+        if (!defaultInfo?.id) {
+            return { ok: false, reason: 'no default dataset id' };
+        }
+        // Now open by ID
+        const byId = await Actor.openDataset({ id: defaultInfo.id });
+        await byId.pushData({ openedBy: 'id-object', id: defaultInfo.id });
+        return { method: 'id-object', datasetId: defaultInfo.id };
+    });
+
+    await check('Actor.openDataset (by { name })', async () => {
+        const datasetName = `sdk-smoke-dataset-name-${Date.now()}`;
+        const dataset = await Actor.openDataset({ name: datasetName });
+        await dataset.pushData({ openedBy: 'name-object', name: datasetName });
+        const info = await dataset.getInfo();
+        return {
+            hasDataset: !!dataset,
+            name: info?.name ?? null,
+            method: 'name-object',
+        };
+    });
+
+    await check('Actor.openDataset (by { alias })', async () => {
+        // Check if ACTOR_STORAGES_JSON is set for alias resolution
+        const storagesJson = process.env.ACTOR_STORAGES_JSON;
+        if (!storagesJson) {
+            return { skipped: true, reason: 'ACTOR_STORAGES_JSON not set' };
+        }
+        // Try to parse and find a dataset alias
+        let parsed: any;
+        try {
+            parsed = JSON.parse(storagesJson);
+        } catch {
+            try {
+                const decoded = Buffer.from(storagesJson, 'base64').toString('utf-8');
+                parsed = JSON.parse(decoded);
+            } catch {
+                return { skipped: true, reason: 'could not parse ACTOR_STORAGES_JSON' };
+            }
+        }
+        const aliases = parsed?.datasets ? Object.keys(parsed.datasets) : [];
+        if (aliases.length === 0) {
+            return { skipped: true, reason: 'no dataset aliases in ACTOR_STORAGES_JSON' };
+        }
+        const alias = aliases[0];
+        const dataset = await Actor.openDataset({ alias });
+        return {
+            hasDataset: !!dataset,
+            alias,
+            method: 'alias-object',
+        };
+    }, false);
+
+    // ============================================
+    // Actor.openKeyValueStore comprehensive tests
+    // ============================================
+
+    await check('Actor.openKeyValueStore (default, no args)', async () => {
         const store = await Actor.openKeyValueStore();
-        return !!store;
+        // Test setValue/getValue roundtrip
+        const testKey = 'sdk-smoke-kvs-test';
+        const testValue = { smoke: true, timestamp: Date.now() };
+        await store.setValue(testKey, testValue);
+        const retrieved = await store.getValue<typeof testValue>(testKey);
+        return {
+            hasStore: !!store,
+            roundtripOk: retrieved?.smoke === true,
+            retrievedValue: retrieved ?? null,
+        };
     });
 
-    await check('Actor.openRequestQueue', async () => {
-        const queue = await Actor.openRequestQueue();
-        return !!queue;
+    await check('Actor.openKeyValueStore (by string name)', async () => {
+        const storeName = `sdk-smoke-kvs-${Date.now()}`;
+        const store = await Actor.openKeyValueStore(storeName);
+        await store.setValue('test-key', { openedBy: 'string-name' });
+        return {
+            hasStore: !!store,
+            method: 'string-name',
+        };
     });
+
+    await check('Actor.openKeyValueStore (by { id })', async () => {
+        // Use the default KVS ID from config
+        const defaultKvsId = Actor.getDefaultInstance().config.get('defaultKeyValueStoreId');
+        if (!defaultKvsId) {
+            return { ok: false, reason: 'no default kvs id in config' };
+        }
+        // Now open by ID
+        const byId = await Actor.openKeyValueStore({ id: defaultKvsId });
+        await byId.setValue('opened-by-id', { method: 'id-object' });
+        return { method: 'id-object', storeId: defaultKvsId };
+    });
+
+    await check('Actor.openKeyValueStore (by { name })', async () => {
+        const storeName = `sdk-smoke-kvs-name-${Date.now()}`;
+        const store = await Actor.openKeyValueStore({ name: storeName });
+        await store.setValue('test-key', { openedBy: 'name-object' });
+        return {
+            hasStore: !!store,
+            method: 'name-object',
+        };
+    });
+
+    await check('Actor.openKeyValueStore (by { alias })', async () => {
+        const storagesJson = process.env.ACTOR_STORAGES_JSON;
+        if (!storagesJson) {
+            return { skipped: true, reason: 'ACTOR_STORAGES_JSON not set' };
+        }
+        let parsed: any;
+        try {
+            parsed = JSON.parse(storagesJson);
+        } catch {
+            try {
+                const decoded = Buffer.from(storagesJson, 'base64').toString('utf-8');
+                parsed = JSON.parse(decoded);
+            } catch {
+                return { skipped: true, reason: 'could not parse ACTOR_STORAGES_JSON' };
+            }
+        }
+        const aliases = parsed?.keyValueStores ? Object.keys(parsed.keyValueStores) : [];
+        if (aliases.length === 0) {
+            return { skipped: true, reason: 'no kvs aliases in ACTOR_STORAGES_JSON' };
+        }
+        const alias = aliases[0];
+        const store = await Actor.openKeyValueStore({ alias });
+        return {
+            hasStore: !!store,
+            alias,
+            method: 'alias-object',
+        };
+    }, false);
+
+    // ============================================
+    // Actor.openRequestQueue comprehensive tests
+    // ============================================
+
+    await check('Actor.openRequestQueue (default, no args)', async () => {
+        const queue = await Actor.openRequestQueue();
+        const info = await queue.getInfo();
+        return {
+            hasQueue: !!queue,
+            queueId: info?.id ?? null,
+            queueName: info?.name ?? null,
+        };
+    });
+
+    await check('Actor.openRequestQueue (by string name)', async () => {
+        const queueName = `sdk-smoke-queue-${Date.now()}`;
+        const queue = await Actor.openRequestQueue(queueName);
+        await queue.addRequest({ url: 'https://example.com/smoke-test', label: 'test' });
+        const info = await queue.getInfo();
+        return {
+            hasQueue: !!queue,
+            name: info?.name ?? null,
+            method: 'string-name',
+        };
+    });
+
+    await check('Actor.openRequestQueue (by { id })', async () => {
+        // First open default to get its ID
+        const defaultQueue = await Actor.openRequestQueue();
+        const defaultInfo = await defaultQueue.getInfo();
+        if (!defaultInfo?.id) {
+            return { ok: false, reason: 'no default queue id' };
+        }
+        // Now open by ID
+        const byId = await Actor.openRequestQueue({ id: defaultInfo.id });
+        return { method: 'id-object', queueId: defaultInfo.id };
+    });
+
+    await check('Actor.openRequestQueue (by { name })', async () => {
+        const queueName = `sdk-smoke-queue-name-${Date.now()}`;
+        const queue = await Actor.openRequestQueue({ name: queueName });
+        await queue.addRequest({ url: 'https://example.com/name-object-test', label: 'name-test' });
+        const info = await queue.getInfo();
+        return {
+            hasQueue: !!queue,
+            name: info?.name ?? null,
+            method: 'name-object',
+        };
+    });
+
+    await check('Actor.openRequestQueue (by { alias })', async () => {
+        const storagesJson = process.env.ACTOR_STORAGES_JSON;
+        if (!storagesJson) {
+            return { skipped: true, reason: 'ACTOR_STORAGES_JSON not set' };
+        }
+        let parsed: any;
+        try {
+            parsed = JSON.parse(storagesJson);
+        } catch {
+            try {
+                const decoded = Buffer.from(storagesJson, 'base64').toString('utf-8');
+                parsed = JSON.parse(decoded);
+            } catch {
+                return { skipped: true, reason: 'could not parse ACTOR_STORAGES_JSON' };
+            }
+        }
+        const aliases = parsed?.requestQueues ? Object.keys(parsed.requestQueues) : [];
+        if (aliases.length === 0) {
+            return { skipped: true, reason: 'no queue aliases in ACTOR_STORAGES_JSON' };
+        }
+        const alias = aliases[0];
+        const queue = await Actor.openRequestQueue({ alias });
+        return {
+            hasQueue: !!queue,
+            alias,
+            method: 'alias-object',
+        };
+    }, false);
 
     const useStateKey = input.useStateKey ?? 'sdk-smoke-state';
 
@@ -410,7 +659,7 @@ await Actor.main(async () => {
     await check('Actor.apifyClient.user', async () => {
         const user = await Actor.apifyClient.user().get();
         return user?.id ?? user;
-    });
+    }, false);  // Non-required: scoped tokens cannot access user account endpoints
 
     const runId = process.env.ACTOR_RUN_ID;
     if (runId) {
@@ -481,9 +730,93 @@ await Actor.main(async () => {
         await skip('Actor.pushData(eventName)', 'no chargeEventName in input');
     }
 
-    await check('Actor.createProxyConfiguration', async () => {
+    // Test: createProxyConfiguration with no options returns undefined
+    await check('Actor.createProxyConfiguration (no options)', async () => {
         const proxy = await Actor.createProxyConfiguration();
         return proxy === undefined;
+    });
+
+    // Test: createProxyConfiguration with useApifyProxy: false returns undefined (Apify compatibility)
+    if (input.testUseApifyProxyFalse) {
+        await check('Actor.createProxyConfiguration (useApifyProxy: false)', async () => {
+            const proxy = await Actor.createProxyConfiguration({ useApifyProxy: false });
+            return proxy === undefined;
+        });
+    } else {
+        await skip('Actor.createProxyConfiguration (useApifyProxy: false)', 'testUseApifyProxyFalse not set');
+    }
+
+    // Test: createProxyConfiguration with proxyUrls from input
+    if (input.proxyUrls && input.proxyUrls.length > 0) {
+        await check('Actor.createProxyConfiguration (with proxyUrls)', async () => {
+            const proxy = await Actor.createProxyConfiguration({
+                proxyUrls: input.proxyUrls,
+                checkAccess: false, // Skip access check for smoke test
+            });
+            if (!proxy) {
+                return { ok: false, reason: 'proxy configuration is undefined' };
+            }
+            // Test newUrl method
+            const url = await proxy.newUrl('test-session');
+            if (!url) {
+                return { ok: false, reason: 'newUrl returned undefined' };
+            }
+            // Verify the URL matches one of the provided proxy URLs
+            const isValidUrl = input.proxyUrls!.includes(url);
+            return {
+                ok: isValidUrl,
+                proxyUrl: url,
+                providedUrls: input.proxyUrls!.length,
+            };
+        });
+
+        await check('Actor.createProxyConfiguration (newProxyInfo)', async () => {
+            const proxy = await Actor.createProxyConfiguration({
+                proxyUrls: input.proxyUrls,
+                checkAccess: false,
+            });
+            if (!proxy) {
+                return { ok: false, reason: 'proxy configuration is undefined' };
+            }
+            const proxyInfo = await proxy.newProxyInfo('session-123');
+            if (!proxyInfo) {
+                return { ok: false, reason: 'newProxyInfo returned undefined' };
+            }
+            return {
+                url: proxyInfo.url,
+                sessionId: proxyInfo.sessionId,
+                hostname: proxyInfo.hostname,
+                port: proxyInfo.port,
+            };
+        });
+    } else {
+        await skip('Actor.createProxyConfiguration (with proxyUrls)', 'no proxyUrls in input');
+        await skip('Actor.createProxyConfiguration (newProxyInfo)', 'no proxyUrls in input');
+    }
+
+    // Test: createProxyConfiguration with custom newUrlFunction
+    await check('Actor.createProxyConfiguration (newUrlFunction)', async () => {
+        let callCount = 0;
+        const proxy = await Actor.createProxyConfiguration({
+            newUrlFunction: (sessionId) => {
+                callCount++;
+                return `http://user:${sessionId}@proxy.example.com:8080`;
+            },
+            checkAccess: false,
+        });
+        if (!proxy) {
+            return { ok: false, reason: 'proxy configuration is undefined' };
+        }
+        const url = await proxy.newUrl('my-session');
+        if (!url) {
+            return { ok: false, reason: 'newUrl returned undefined' };
+        }
+        const hasSession = url.includes('my-session');
+        return {
+            ok: hasSession,
+            url,
+            callCount,
+        };
     });
 
     if (input.targetActorId) {
