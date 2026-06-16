@@ -1317,18 +1317,14 @@ await Actor.main(async () => {
     if (!input.skipReboot) {
         try {
             console.log('[sdk-smoke] Rebooting...');
-            await Actor.reboot();
-            // Note: reboot should not return, but if it does, we continue
-            // The container will be stopped and restarted
-            summary.rebootAtEnd = { status: 'ok', note: 'reboot initiated' };
+            const httpStatus = await Actor.reboot();
+            summary.rebootAtEnd = { status: 'ok', httpStatus };
             await Actor.setValue('OUTPUT', summary);
             console.log('[sdk-smoke] Reboot at end', summary.rebootAtEnd);
         } catch (err) {
-            summary.rebootAtEnd = {
-                status: 'fail',
-                error: (err as Error).message,
-            };
-            console.error('[sdk-smoke] Reboot at end failed', summary.rebootAtEnd);
+            const error = (err as Error).message;
+            summary.rebootAtEnd = { status: 'fail', error };
+            console.error('[sdk-smoke] Reboot at end failed:', error);
             await Actor.setValue('OUTPUT', summary);
             throw err;
         }
