@@ -50,6 +50,12 @@ interface SmokeInput {
     testUseApifyProxyFalse?: boolean;
     /** When true, skip the abort at the end (useful for debugging). */
     skipAbort?: boolean;
+    /** When true, skip the metamorph test at the end. */
+    skipMetamorph?: boolean;
+    /** When true, skip the reboot test at the end. */
+    skipReboot?: boolean;
+    /** Target actor ID to metamorph into (required for metamorph test). */
+    metamorphTargetActorId?: string;
 }
 
 const results: SmokeCheck[] = [];
@@ -1214,15 +1220,11 @@ await Actor.main(async () => {
         });
     }
 
-    if (input.skipDestructive !== false) {
-        await skip('Actor.metamorph', 'skipDestructive=true');
-        await skip('Actor.reboot', 'skipDestructive=true');
-        await skip('Actor.abort', 'skipDestructive=true');
-    } else {
-        await skip('Actor.metamorph', 'destructive — not implemented in smoke');
-        await skip('Actor.reboot', 'destructive — not implemented in smoke');
-        await skip('Actor.abort', 'runs at end after OUTPUT (see abortAtEnd in summary)');
-    }
+    // Metamorph, reboot, and abort are destructive - they're tested at the end after OUTPUT is saved.
+    // Individual skip flags allow fine-grained control over which destructive tests to run.
+    await skip('Actor.metamorph', 'tested at end after OUTPUT (see metamorphAtEnd in summary)');
+    await skip('Actor.reboot', 'tested at end after OUTPUT (see rebootAtEnd in summary)');
+    await skip('Actor.abort', 'tested at end after OUTPUT (see abortAtEnd in summary)');
 
     const summary: Record<string, unknown> = {
         currentRunId,
@@ -1280,5 +1282,59 @@ await Actor.main(async () => {
         summary.abortAtEnd = { status: 'skip', reason: 'skipAbort=true' };
         await Actor.setValue('OUTPUT', summary);
         console.log('[sdk-smoke] Skipping abort (skipAbort=true)');
+    }
+
+    // Metamorph test at end (after OUTPUT is saved, since metamorph terminates the process)
+    if (!input.skipMetamorph && input.metamorphTargetActorId) {
+        try {
+            console.log(`[sdk-smoke] Metamorphosing to actor ${input.metamorphTargetActorId}...`);
+            await Actor.metamorph(input.metamorphTargetActorId, { metamorphTest: true, originalRunId: currentRunId });
+            // Note: metamorph calls process.exit(0), so this line is unreachable
+            // If we reach here, something went wrong
+            summary.metamorphAtEnd = { status: 'fail', reason: 'metamorph did not exit process' };
+            await Actor.setValue('OUTPUT', summary);
+        } catch (err) {
+            summary.metamorphAtEnd = {
+                status: 'fail',
+                targetActorId: input.metamorphTargetActorId,
+                error: (err as Error).message,
+            };
+            console.error('[sdk-smoke] Metamorph at end failed', summary.metamorphAtEnd);
+            await Actor.setValue('OUTPUT', summary);
+            throw err;
+        }
+    } else if (!input.skipMetamorph && !input.metamorphTargetActorId) {
+        summary.metamorphAtEnd = { status: 'skip', reason: 'no metamorphTargetActorId provided' };
+        await Actor.setValue('OUTPUT', summary);
+        console.log('[sdk-smoke] Skipping metamorph (no metamorphTargetActorId)');
+    } else if (input.skipMetamorph) {
+        summary.metamorphAtEnd = { status: 'skip', reason: 'skipMetamorph=true' };
+        await Actor.setValue('OUTPUT', summary);
+        console.log('[sdk-smoke] Skipping metamorph (skipMetamorph=true)');
+    }
+
+    // Reboot test at end (after OUTPUT is saved, since reboot restarts the container)
+    if (!input.skipReboot) {
+        try {
+            console.log('[sdk-smoke] Rebooting...');
+            await Actor.reboot();
+            // Note: reboot should not return, but if it does, we continue
+            // The container will be stopped and restarted
+            summary.rebootAtEnd = { status: 'ok', note: 'reboot initiated' };
+            await Actor.setValue('OUTPUT', summary);
+            console.log('[sdk-smoke] Reboot at end', summary.rebootAtEnd);
+        } catch (err) {
+            summary.rebootAtEnd = {
+                status: 'fail',
+                error: (err as Error).message,
+            };
+            console.error('[sdk-smoke] Reboot at end failed', summary.rebootAtEnd);
+            await Actor.setValue('OUTPUT', summary);
+            throw err;
+        }
+    } else {
+        summary.rebootAtEnd = { status: 'skip', reason: 'skipReboot=true' };
+        await Actor.setValue('OUTPUT', summary);
+        console.log('[sdk-smoke] Skipping reboot (skipReboot=true)');
     }
 });
