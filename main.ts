@@ -48,6 +48,8 @@ interface SmokeInput {
     proxyUrls?: string[];
     /** When true, test useApifyProxy: false returns undefined. */
     testUseApifyProxyFalse?: boolean;
+    /** When true, skip the abort at the end (useful for debugging). */
+    skipAbort?: boolean;
 }
 
 const results: SmokeCheck[] = [];
@@ -746,14 +748,20 @@ await Actor.main(async () => {
 
     await check('Actor.useState (persistState)', async () => {
         const state = await Actor.useState(useStateKey, { count: 0, saved: false });
+        console.log(`[sdk-smoke] useState persistState: initial state =`, JSON.stringify(state));
+        console.log(`[sdk-smoke] useState persistState: state identity =`, state === (await Actor.useState(useStateKey, { count: 0, saved: false })));
         state.count = 99;
         state.saved = true;
+        console.log(`[sdk-smoke] useState persistState: after mutation, state =`, JSON.stringify(state));
 
         const eventManager = Actor.getDefaultInstance().config.getEventManager();
+        console.log(`[sdk-smoke] useState persistState: emitting persistState event, eventManager type =`, eventManager.constructor.name);
         eventManager.emit('persistState', { isMigrating: false });
-        await new Promise((r) => setTimeout(r, 300));
+        await new Promise((r) => setTimeout(r, 500));
 
         const restored = await Actor.useState(useStateKey, { count: 0, saved: false });
+        console.log(`[sdk-smoke] useState persistState: restored state =`, JSON.stringify(restored));
+        console.log(`[sdk-smoke] useState persistState: restored same ref?`, restored === state);
         if (restored.count !== 99) {
             return { ok: false, count: restored.count, saved: restored.saved };
         }
@@ -1235,7 +1243,7 @@ await Actor.main(async () => {
     console.log('[sdk-smoke] Smoke test complete', summary);
 
     // Abort after OUTPUT is persisted (self by default, or abortTargetRunId).
-    if (input.skipDestructive === false) {
+    if (input.skipDestructive === false && !input.skipAbort) {
         const abortRunId = input.abortTargetRunId ?? currentRunId;
         if (!abortRunId) {
             summary.abortAtEnd = { status: 'skip', reason: 'no currentRunId or abortTargetRunId' };
@@ -1268,5 +1276,9 @@ await Actor.main(async () => {
         }
 
         await Actor.setValue('OUTPUT', summary);
+    } else if (input.skipAbort) {
+        summary.abortAtEnd = { status: 'skip', reason: 'skipAbort=true' };
+        await Actor.setValue('OUTPUT', summary);
+        console.log('[sdk-smoke] Skipping abort (skipAbort=true)');
     }
 });
