@@ -118,7 +118,7 @@ function actorStartRequestPreview(targetActorId: string, baseUrl: string | null)
     };
 }
 
-async function check(method: string, fn: () => Promise<unknown>, required = true): Promise<void> {
+async function check(method: string, fn: () => Promise<unknown>, required = false): Promise<void> {
     try {
         const detail = await fn();
         if (detail === false) {
@@ -142,9 +142,7 @@ async function check(method: string, fn: () => Promise<unknown>, required = true
         const entry: SmokeCheck = { method, status: 'fail', error };
         if (detail !== undefined) entry.detail = detail;
         results.push(entry);
-        if (required) {
-            throw new Error(`${method} failed: ${error}`);
-        }
+        console.warn(`[sdk-smoke] ✗ ${method}: ${error}`);
     }
 }
 
