@@ -417,12 +417,10 @@ await Actor.main(async () => {
     });
 
     await check('Actor.openDataset (by { alias })', async () => {
-        // Check if ACTOR_STORAGES_JSON is set for alias resolution
         const storagesJson = process.env.ACTOR_STORAGES_JSON;
         if (!storagesJson) {
             return { skipped: true, reason: 'ACTOR_STORAGES_JSON not set' };
         }
-        // Try to parse and find a dataset alias
         let parsed: any;
         try {
             parsed = JSON.parse(storagesJson);
@@ -447,6 +445,141 @@ await Actor.main(async () => {
         };
     }, false);
 
+    // ============================================
+    // Dataset method tests (forEach, map, reduce, entries, values, export, drop)
+    // ============================================
+
+    await check('Dataset.getData (with fields filter)', async () => {
+        const dataset = await Actor.openDataset(`sdk-smoke-fields-${Date.now()}`);
+        await dataset.pushData([
+            { id: 1, name: 'test', extra: 'should-be-removed' },
+            { id: 2, name: 'test2', extra: 'also-removed' },
+        ]);
+        const data = await dataset.getData({ fields: ['id', 'name'] });
+        const hasExtra = data.items.some(item => 'extra' in item);
+        return {
+            ok: !hasExtra,
+            fieldsReturned: Object.keys(data.items[0] ?? {}),
+        };
+    });
+
+    await check('Dataset.getData (with skipHidden)', async () => {
+        const dataset = await Actor.openDataset(`sdk-smoke-skiphidden-${Date.now()}`);
+        await dataset.pushData([
+            { id: 1, name: 'visible', '#secret': 'hidden' },
+            { id: 2, name: 'visible2', '#private': 'also-hidden' },
+        ]);
+        const data = await dataset.getData({ skipHidden: true });
+        const hasHidden = data.items.some(item => Object.keys(item).some(k => k.startsWith('#')));
+        return { ok: !hasHidden, itemCount: data.items.length };
+    });
+
+    await check('Dataset.getData (with clean)', async () => {
+        const dataset = await Actor.openDataset(`sdk-smoke-clean-${Date.now()}`);
+        await dataset.pushData([
+            { id: 1, '#hidden': 'field' },
+            { name: 'valid' },
+            {},
+        ]);
+        const data = await dataset.getData({ clean: true });
+        const hasHidden = data.items.some(item => Object.keys(item).some(k => k.startsWith('#')));
+        const hasEmpty = data.items.some(item => Object.keys(item).length === 0);
+        return { ok: !hasHidden && !hasEmpty, itemCount: data.items.length };
+    });
+
+    await check('Dataset.forEach', async () => {
+        const dataset = await Actor.openDataset(`sdk-smoke-foreach-${Date.now()}`);
+        await dataset.pushData([{ n: 1 }, { n: 2 }, { n: 3 }]);
+        const sum: number[] = [];
+        await dataset.forEach((item) => {
+            sum.push((item as any).n);
+        });
+        return { sum, total: sum.reduce((a, b) => a + b, 0) };
+    });
+
+    await check('Dataset.map', async () => {
+        const dataset = await Actor.openDataset(`sdk-smoke-map-${Date.now()}`);
+        await dataset.pushData([{ v: 10 }, { v: 20 }, { v: 30 }]);
+        const doubled = await dataset.map((item) => (item as any).v * 2);
+        return { doubled, sum: doubled.reduce((a, b) => a + b, 0) };
+    });
+
+    await check('Dataset.reduce', async () => {
+        const dataset = await Actor.openDataset(`sdk-smoke-reduce-${Date.now()}`);
+        await dataset.pushData([{ v: 1 }, { v: 2 }, { v: 3 }, { v: 4 }]);
+        const sum = await dataset.reduce((acc, item) => acc + (item as any).v, 0);
+        return { sum };
+    });
+
+    await check('Dataset.values', async () => {
+        const dataset = await Actor.openDataset(`sdk-smoke-values-${Date.now()}`);
+        await dataset.pushData([{ x: 1 }, { x: 2 }]);
+        const collected: any[] = [];
+        for await (const item of dataset.values()) {
+            collected.push(item);
+        }
+        return { count: collected.length, values: collected.map(i => (i as any).x) };
+    });
+
+    await check('Dataset.entries', async () => {
+        const dataset = await Actor.openDataset(`sdk-smoke-entries-${Date.now()}`);
+        await dataset.pushData([{ a: 1 }, { a: 2 }, { a: 3 }]);
+        const entries: [number, any][] = [];
+        for await (const [idx, item] of dataset.entries()) {
+            entries.push([idx, item]);
+        }
+        return {
+            count: entries.length,
+            indices: entries.map(([idx]) => idx),
+            values: entries.map(([, item]) => (item as any).a),
+        };
+    });
+
+    await check('Dataset [asyncIterator]', async () => {
+        const dataset = await Actor.openDataset(`sdk-smoke-iterator-${Date.now()}`);
+        await dataset.pushData([{ i: 1 }, { i: 2 }]);
+        const items: any[] = [];
+        for await (const item of dataset) {
+            items.push(item);
+        }
+        return { count: items.length, values: items.map(i => (i as any).i) };
+    });
+
+    await check('Dataset.export', async () => {
+        const dataset = await Actor.openDataset(`sdk-smoke-export-${Date.now()}`);
+        await dataset.pushData([{ e: 1 }, { e: 2 }, { e: 3 }]);
+        const all = await dataset.export();
+        return { count: all.length, values: all.map(i => (i as any).e) };
+    });
+
+    await check('Dataset.getInfo', async () => {
+        const dataset = await Actor.openDataset(`sdk-smoke-info-${Date.now()}`);
+        await dataset.pushData([{ test: 'info' }]);
+        const info = await dataset.getInfo();
+        return {
+            hasId: !!info?.id,
+            itemCount: info?.itemCount ?? 0,
+            hasDates: !!(info?.createdAt && info?.modifiedAt),
+        };
+    });
+
+    await check('Dataset.drop (create and delete)', async () => {
+        const datasetName = `sdk-smoke-drop-${Date.now()}`;
+        const dataset = await Actor.openDataset(datasetName);
+        await dataset.pushData([{ willBeDeleted: true }]);
+        const infoBefore = await dataset.getInfo();
+        await dataset.drop();
+        // Verify it's gone by trying to get info (should return undefined for new dataset with same name)
+        const newDataset = await Actor.openDataset(datasetName);
+        const infoAfter = await newDataset.getInfo();
+        return {
+            hadItemsBefore: (infoBefore?.itemCount ?? 0) > 0,
+            itemCountAfterDrop: infoAfter?.itemCount ?? 0,
+        };
+    });
+
+    // ============================================
+    // Actor.openKeyValueStore comprehensive tests
     // ============================================
     // Actor.openKeyValueStore comprehensive tests
     // ============================================
@@ -686,6 +819,43 @@ await Actor.main(async () => {
     await check('Actor.getChargingManager', async () => {
         const manager = Actor.getChargingManager();
         return manager.getPricingInfo();
+    });
+
+    await check('ChargingManager.calculatePushDataLimits', async () => {
+        const manager = Actor.getChargingManager();
+        const pricingInfo = manager.getPricingInfo();
+
+        // Test with array of items
+        const items = [{ id: 1 }, { id: 2 }, { id: 3 }];
+        // Ensure eventName is a string (not undefined) for the test
+        const testEventName: string = input.chargeEventName || 'test-event';
+        const result = manager.calculatePushDataLimits({
+            eventName: testEventName,
+            isDefaultDataset: true,
+            items,
+        });
+
+        // Verify return shape
+        if (!('eventsToCharge' in result) || !('limitedItems' in result)) {
+            return { ok: false, reason: 'missing expected keys', result };
+        }
+
+        // For non-PPE or no event, should return all items
+        if (!pricingInfo.isPayPerEvent || !input.chargeEventName) {
+            if (result.limitedItems.length !== items.length) {
+                return { ok: false, reason: 'should return all items when not PPE or no event', result };
+            }
+            if (Object.keys(result.eventsToCharge).length !== 0) {
+                return { ok: false, reason: 'should have no events to charge when not PPE', result };
+            }
+        }
+
+        return {
+            hasMethod: true,
+            eventsToCharge: result.eventsToCharge,
+            limitedItemsCount: result.limitedItems.length,
+            isPayPerEvent: pricingInfo.isPayPerEvent,
+        };
     });
 
     await check('smokeActor.charge (instance method)', async () => typeof smokeActor.charge === 'function');
@@ -1013,7 +1183,7 @@ await Actor.main(async () => {
                 eventTypes: ['ACTOR.RUN.SUCCEEDED'],
                 requestUrl,
                 description: 'sdk-smoke',
-                idempotencyKey: currentRunId ?? undefined,
+                ...(currentRunId ? { idempotencyKey: currentRunId } : {}),
             });
             if (!webhook?.id) {
                 return { ok: false, reason: 'no webhook id returned' };
