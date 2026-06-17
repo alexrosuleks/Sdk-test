@@ -12,12 +12,16 @@
  *   "abortTargetRunId": "<id-of-another-running-run>"
  * }
  *
+ * Request-queue-only mode (skips all other SDK checks and end-of-run abort/metamorph/reboot):
+ * { "testRequestQueue": true, "testRequestQueueReboot": true }
+ *
  * Abort smoke: set skipDestructive to false. By default the smoke run aborts itself
  * after OUTPUT is written (current run id from config/env). Optional abortTargetRunId
  * aborts another run instead.
  */
 
 import { Actor, Configuration } from 'scrapely';
+import { runRequestQueueSmokeSuite } from './request-queue-smoke.ts';
 
 /** Apify-compatible instance (options env vars override at runtime on platform). */
 const smokeActor = new Actor({ persistStateIntervalMillis: 60_000 });
@@ -56,6 +60,12 @@ interface SmokeInput {
     skipReboot?: boolean;
     /** Target actor ID to metamorph into (required for metamorph test). */
     metamorphTargetActorId?: string;
+    /** Run only request-queue smoke tests (skips all other SDK checks). */
+    testRequestQueue?: boolean;
+    /** Within RQ-only mode: run reboot persistence test at end (two-phase via KVS). */
+    testRequestQueueReboot?: boolean;
+    /** Named queue for shared/dual-consumer tests (default: sdk-smoke-rq-shared). */
+    requestQueueSharedName?: string;
 }
 
 const results: SmokeCheck[] = [];
@@ -165,6 +175,37 @@ await Actor.main(async () => {
         Actor.getDefaultInstance().config.get('actorRunId') ??
         process.env.ACTOR_RUN_ID ??
         null;
+
+    if (input.testRequestQueue) {
+        const rqOutcome = await runRequestQueueSmokeSuite(input, {
+            currentRunId,
+            results,
+            check,
+            skip,
+        });
+
+        if (rqOutcome === 'complete') {
+            const summary: Record<string, unknown> = {
+                mode: 'request-queue-only',
+                currentRunId,
+                passed: results.filter((r) => r.status === 'ok').length,
+                failed: results.filter((r) => r.status === 'fail').length,
+                skipped: results.filter((r) => r.status === 'skip').length,
+                checks: results,
+            };
+
+            await Actor.pushData(results);
+            await Actor.setValue('OUTPUT', summary);
+
+            const failed = results.filter((r) => r.status === 'fail');
+            if (failed.length > 0) {
+                console.log('[sdk-smoke-rq] Some checks failed:', failed.map((f) => f.method).join(', '));
+                throw new Error(`Request queue smoke failed: ${failed.map((f) => f.method).join(', ')}`);
+            }
+            console.log('[sdk-smoke-rq] Request queue smoke complete', summary);
+        }
+        return;
+    }
 
     await check('Actor.init (via main)', async () => {
         return smokeActor.initialized && Actor.getDefaultInstance().initialized;
@@ -1317,7 +1358,7 @@ await Actor.main(async () => {
     if (!input.skipReboot) {
         try {
             console.log('[sdk-smoke] Rebooting...');
-            const httpStatus = await Actor.reboot();
+            const httpStatus = await Actor.reboot({ customAfterSleepMillis: 0 });
             summary.rebootAtEnd = { status: 'ok', httpStatus };
             await Actor.setValue('OUTPUT', summary);
             console.log('[sdk-smoke] Reboot at end', summary.rebootAtEnd);
