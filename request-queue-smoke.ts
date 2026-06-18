@@ -280,6 +280,275 @@ async function sharedQueueTests(ctx: RequestQueueSmokeContext, input: RequestQue
     });
 }
 
+async function parityTests(ctx: RequestQueueSmokeContext): Promise<void> {
+    const { check, currentRunId } = ctx;
+    const prefix = runPrefix(currentRunId);
+
+    await check('RQ.addRequest.forefront', async () => {
+        const queueName = `sdk-smoke-rq-forefront-${Date.now()}`;
+        const queue = await Actor.openRequestQueue(queueName);
+        const keyBack = `${prefix}-forefront-back`;
+        const keyFront = `${prefix}-forefront-front`;
+        await queue.addRequest({ url: urlFor(prefix, 'forefront-back'), uniqueKey: keyBack });
+        await queue.addRequest({ url: urlFor(prefix, 'forefront-front'), uniqueKey: keyFront }, { forefront: true });
+
+        const first = await queue.fetchNextRequest();
+        await queue.reclaimRequest(first!);
+        return {
+            firstUniqueKey: first?.uniqueKey ?? null,
+            forefrontWorked: first?.uniqueKey === keyFront,
+        };
+    });
+
+    await check('RQ.addRequests.batch', async () => {
+        const queueName = `sdk-smoke-rq-addrequests-${Date.now()}`;
+        const queue = await Actor.openRequestQueue(queueName);
+        const before = await getQueueCounts(queue);
+        const slugs = Array.from({ length: 30 }, (_, i) => `batch-${i}`);
+        const requests = slugs.map((slug) => ({
+            url: urlFor(prefix, slug),
+            uniqueKey: `${prefix}-${slug}`,
+        }));
+        const result = await queue.addRequests(requests);
+        const after = await getQueueCounts(queue);
+        return {
+            requested: requests.length,
+            processed: result.processedRequests.length,
+            unprocessed: result.unprocessedRequests.length,
+            totalDelta: after.totalRequestCount - before.totalRequestCount,
+            ok: result.processedRequests.length === requests.length
+                && result.unprocessedRequests.length === 0
+                && after.totalRequestCount - before.totalRequestCount >= requests.length,
+        };
+    });
+
+    await check('RQ.addRequestsBatched.waitAll', async () => {
+        const queueName = `sdk-smoke-rq-batched-${Date.now()}`;
+        const queue = await Actor.openRequestQueue(queueName);
+        const slugs = Array.from({ length: 30 }, (_, i) => `batched-${i}`);
+        const requests = slugs.map((slug) => ({
+            url: urlFor(prefix, slug),
+            uniqueKey: `${prefix}-${slug}`,
+        }));
+        const { addedRequests, waitForAllRequestsToBeAdded } = await queue.addRequestsBatched(requests, {
+            waitForAllRequestsToBeAdded: true,
+        });
+        await waitForAllRequestsToBeAdded;
+        const after = await getQueueCounts(queue);
+        return {
+            addedRequests,
+            pendingCount: after.pendingRequestCount,
+            ok: addedRequests >= requests.length && after.pendingRequestCount >= requests.length,
+        };
+    });
+
+    await check('RQ.getRequest', async () => {
+        const queueName = `sdk-smoke-rq-getreq-${Date.now()}`;
+        const queue = await Actor.openRequestQueue(queueName);
+        const uniqueKey = `${prefix}-getreq`;
+        const url = urlFor(prefix, 'getreq');
+        const addResult = await queue.addRequest({ url, uniqueKey });
+        const fetched = await queue.getRequest(addResult.requestId);
+        return {
+            requestId: addResult.requestId,
+            found: !!fetched,
+            urlMatch: (fetched as { url?: string } | null)?.url === url,
+            uniqueKeyMatch: (fetched as { uniqueKey?: string } | null)?.uniqueKey === uniqueKey,
+        };
+    });
+
+    await check('RQ.handledCount', async () => {
+        const queueName = `sdk-smoke-rq-handledcount-${Date.now()}`;
+        const queue = await Actor.openRequestQueue(queueName);
+        const uniqueKey = `${prefix}-handledcount`;
+        await queue.addRequest({ url: urlFor(prefix, 'handledcount'), uniqueKey });
+        const before = await queue.handledCount();
+        const req = await queue.fetchNextRequest();
+        if (!req) return { ok: false, reason: 'no request to handle' };
+        await queue.markRequestHandled(req);
+        const after = await queue.handledCount();
+        return {
+            before,
+            after,
+            increased: after > before,
+        };
+    });
+
+    await check('RQ.offlineCounts', async () => {
+        const queueName = `sdk-smoke-rq-offline-${Date.now()}`;
+        const queue = await Actor.openRequestQueue(queueName);
+        const beforeTotal = queue.getTotalCount();
+        const beforePending = queue.getPendingCount();
+        await queue.addRequest({ url: urlFor(prefix, 'offline-a'), uniqueKey: `${prefix}-offline-a` });
+        await queue.addRequest({ url: urlFor(prefix, 'offline-b'), uniqueKey: `${prefix}-offline-b` });
+        return {
+            beforeTotal,
+            beforePending,
+            afterTotal: queue.getTotalCount(),
+            afterPending: queue.getPendingCount(),
+            totalIncreased: queue.getTotalCount() > beforeTotal,
+            pendingIncreased: queue.getPendingCount() > beforePending,
+        };
+    });
+
+    await check('RQ.isEmpty.isFinished', async () => {
+        const queueName = `sdk-smoke-rq-finished-${Date.now()}`;
+        const queue = await Actor.openRequestQueue(queueName);
+        const uniqueKey = `${prefix}-finished`;
+        await queue.addRequest({ url: urlFor(prefix, 'finished'), uniqueKey });
+
+        const emptyBeforeHandle = await queue.isEmpty();
+        const finishedBeforeHandle = await queue.isFinished();
+
+        const req = await queue.fetchNextRequest();
+        if (!req) return { ok: false, reason: 'no request to handle' };
+        await queue.markRequestHandled(req);
+
+        const emptyAfterHandle = await queue.isEmpty();
+        const finishedAfterHandle = await queue.isFinished();
+
+        return {
+            emptyBeforeHandle,
+            finishedBeforeHandle,
+            emptyAfterHandle,
+            finishedAfterHandle,
+            finishedWhenDrained: finishedAfterHandle === true,
+        };
+    });
+
+    await check('RQ.asyncIterator', async () => {
+        const queueName = `sdk-smoke-rq-iterator-${Date.now()}`;
+        const queue = await Actor.openRequestQueue(queueName);
+        const keys = ['iter-a', 'iter-b', 'iter-c'].map((s) => `${prefix}-${s}`);
+        for (const key of keys) {
+            await queue.addRequest({ url: urlFor(prefix, key), uniqueKey: key });
+        }
+
+        const seen: string[] = [];
+        for await (const req of queue) {
+            seen.push(req.uniqueKey);
+            await queue.reclaimRequest(req);
+            if (seen.length >= keys.length) break;
+        }
+
+        return {
+            seenCount: seen.length,
+            allKeysFound: keys.every((k) => seen.includes(k)),
+        };
+    });
+
+    await check('RQ.getInfo.shape', async () => {
+        const queue = await Actor.openRequestQueue();
+        const info = await queue.getInfo();
+        return {
+            hasId: !!info?.id,
+            hasCounts: info?.totalRequestCount !== undefined
+                && info?.pendingRequestCount !== undefined
+                && info?.handledRequestCount !== undefined,
+            hasDates: !!info?.createdAt && !!info?.modifiedAt && !!info?.accessedAt,
+            hasStats: info?.stats !== undefined
+                && info.stats.readCount !== undefined
+                && info.stats.writeCount !== undefined,
+            hasActFields: info?.actId !== undefined || info?.actRunId !== undefined,
+        };
+    });
+
+    await check('RQ.addRequest.forefrontCrossClient', async () => {
+        const queueName = `sdk-smoke-rq-forefront-cc-${Date.now()}`;
+        const keyBack = `${prefix}-forefront-cc-back`;
+        const keyFront = `${prefix}-forefront-cc-front`;
+
+        const producer = await Actor.openRequestQueue(queueName);
+        await producer.addRequest({ url: urlFor(prefix, 'forefront-cc-back'), uniqueKey: keyBack });
+        await producer.addRequest(
+            { url: urlFor(prefix, 'forefront-cc-front'), uniqueKey: keyFront },
+            { forefront: true },
+        );
+
+        const consumer = await Actor.openRequestQueue(queueName);
+        const first = await consumer.fetchNextRequest();
+        await consumer.reclaimRequest(first!);
+
+        return {
+            firstUniqueKey: first?.uniqueKey ?? null,
+            forefrontWorked: first?.uniqueKey === keyFront,
+        };
+    });
+
+    await check('RQ.reclaimRequest.forefrontCrossClient', async () => {
+        const queueName = `sdk-smoke-rq-reclaim-cc-${Date.now()}`;
+        const keyA = `${prefix}-reclaim-cc-a`;
+        const keyB = `${prefix}-reclaim-cc-b`;
+
+        const producer = await Actor.openRequestQueue(queueName);
+        await producer.addRequest({ url: urlFor(prefix, 'reclaim-cc-a'), uniqueKey: keyA });
+        await producer.addRequest({ url: urlFor(prefix, 'reclaim-cc-b'), uniqueKey: keyB });
+
+        const consumer1 = await Actor.openRequestQueue(queueName);
+        const locked = await consumer1.fetchNextRequest();
+        if (!locked) return { ok: false, reason: 'no request to reclaim' };
+
+        await consumer1.reclaimRequest(locked, { forefront: true });
+
+        const consumer2 = await Actor.openRequestQueue(queueName);
+        const again = await consumer2.fetchNextRequest();
+
+        return {
+            lockedUniqueKey: locked.uniqueKey,
+            againUniqueKey: again?.uniqueKey ?? null,
+            forefrontWorked: again?.uniqueKey === locked.uniqueKey,
+        };
+    });
+
+    await check('RQ.addRequestsBatched.options', async () => {
+        const queueName = `sdk-smoke-rq-batched-opts-${Date.now()}`;
+        const queue = await Actor.openRequestQueue(queueName);
+        const before = await getQueueCounts(queue);
+        const slugs = Array.from({ length: 10 }, (_, i) => `batched-opts-${i}`);
+        const requests = slugs.map((slug) => ({
+            url: urlFor(prefix, slug),
+            uniqueKey: `${prefix}-${slug}`,
+        }));
+
+        const { addedRequests, waitForAllRequestsToBeAdded } = await queue.addRequestsBatched(requests, {
+            batchSize: 5,
+            waitBetweenBatchesMillis: 50,
+        });
+        const initialAdded = addedRequests.length;
+        const allAdded = await waitForAllRequestsToBeAdded;
+        const after = await getQueueCounts(queue);
+
+        return {
+            requested: requests.length,
+            initialAdded,
+            allAddedCount: allAdded.length,
+            totalDelta: after.totalRequestCount - before.totalRequestCount,
+            ok: initialAdded >= 5
+                && allAdded.length === requests.length
+                && after.totalRequestCount - before.totalRequestCount >= requests.length,
+        };
+    });
+
+    await check('RQ.drop', async () => {
+        const queueName = `sdk-smoke-rq-drop-${Date.now()}`;
+        const queue = await Actor.openRequestQueue(queueName);
+        await queue.addRequest({
+            url: urlFor(prefix, 'drop'),
+            uniqueKey: `${prefix}-drop`,
+        });
+        const beforeDrop = await queue.getInfo();
+        await queue.drop();
+        const reopened = await Actor.openRequestQueue(queueName);
+        const afterDrop = await getQueueCounts(reopened);
+        return {
+            droppedId: beforeDrop?.id ?? null,
+            afterTotal: afterDrop.totalRequestCount,
+            afterPending: afterDrop.pendingRequestCount,
+            queueRecreatedEmpty: afterDrop.totalRequestCount === 0 && afterDrop.pendingRequestCount === 0,
+        };
+    });
+}
+
 async function verifyPostReboot(ctx: RequestQueueSmokeContext, checkpoint: RebootCheckpoint): Promise<void> {
     const { check } = ctx;
 
@@ -373,6 +642,7 @@ export async function runRequestQueueSmokeSuite(
     await defaultQueueTests(ctx);
     await namedPersistenceTest(ctx);
     await sharedQueueTests(ctx, input);
+    await parityTests(ctx);
 
     if (input.testRequestQueueReboot) {
         const failed = results.filter((r) => r.status === 'fail');
