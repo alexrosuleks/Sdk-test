@@ -338,7 +338,7 @@ async function parityTests(ctx: RequestQueueSmokeContext): Promise<void> {
         return {
             addedRequests,
             pendingCount: after.pendingRequestCount,
-            ok: addedRequests >= requests.length && after.pendingRequestCount >= requests.length,
+            ok: addedRequests.length >= requests.length && after.pendingRequestCount >= requests.length,
         };
     });
 
@@ -522,9 +522,10 @@ async function parityTests(ctx: RequestQueueSmokeContext): Promise<void> {
             requested: requests.length,
             initialAdded,
             allAddedCount: allAdded.length,
+            totalAdded: initialAdded + allAdded.length,
             totalDelta: after.totalRequestCount - before.totalRequestCount,
-            ok: initialAdded >= 5
-                && allAdded.length === requests.length
+            ok: initialAdded === 5
+                && allAdded.length === requests.length - initialAdded
                 && after.totalRequestCount - before.totalRequestCount >= requests.length,
         };
     });
