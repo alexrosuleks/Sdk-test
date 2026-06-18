@@ -20,7 +20,7 @@
  * aborts another run instead.
  */
 
-import { Actor, Configuration } from 'scrapely';
+import { Actor, Configuration, PlatformEventManager } from 'scrapely';
 import { runRequestQueueSmokeSuite } from './request-queue-smoke.ts';
 
 /** Apify-compatible instance (options env vars override at runtime on platform). */
@@ -832,6 +832,57 @@ await Actor.main(async () => {
         isMigrating: false,
     });
     await check('Actor.on (EventManager persistState)', async () => persistStateFired);
+
+    await check('Actor.events wired to EventManager', async () => {
+        const eventManager = Actor.getDefaultInstance().config.getEventManager();
+        return Actor.events === (eventManager as unknown as { events: unknown }).events;
+    });
+
+    let eventsPersistStateFired = false;
+    Actor.events.on('persistState', () => {
+        eventsPersistStateFired = true;
+    });
+    Actor.getDefaultInstance().config.getEventManager().emit('persistState', {
+        isMigrating: false,
+    });
+    await check('Actor.events.on (persistState)', async () => eventsPersistStateFired);
+
+    let cpuInfoFired = false;
+    Actor.on('cpuInfo', (data: { isCpuOverloaded: boolean }) => {
+        cpuInfoFired = typeof data?.isCpuOverloaded === 'boolean';
+    });
+    Actor.getDefaultInstance().config.getEventManager().emit('cpuInfo', {
+        isCpuOverloaded: true,
+    });
+    await check('Actor.on (cpuInfo)', async () => cpuInfoFired);
+
+    let migratingFired = false;
+    Actor.on('migrating', () => {
+        migratingFired = true;
+    });
+    Actor.getDefaultInstance().config.getEventManager().emit('migrating');
+    await check('Actor.on (migrating)', async () => migratingFired);
+
+    let abortingFired = false;
+    Actor.on('aborting', () => {
+        abortingFired = true;
+    });
+    Actor.getDefaultInstance().config.getEventManager().emit('aborting');
+    await check('Actor.on (aborting)', async () => abortingFired);
+
+    await check('PlatformEventManager.close() emits final persistState', async () => {
+        const cfg = new Configuration({ persistStateIntervalMillis: 60_000 });
+        const eventManager = new PlatformEventManager(cfg);
+        await eventManager.init();
+        let finalPersistFired = false;
+        eventManager.on('persistState', (data: { isMigrating: boolean }) => {
+            if (!data.isMigrating) {
+                finalPersistFired = true;
+            }
+        });
+        await eventManager.close();
+        return finalPersistFired;
+    });
 
     await check('Actor.newClient', async () => {
         const client = Actor.newClient();
