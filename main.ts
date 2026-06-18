@@ -1093,6 +1093,117 @@ await Actor.main(async () => {
         };
     });
 
+    await check('Actor.createProxyConfiguration (useApifyProxy: true, no proxyUrls)', async () => {
+        const proxy = await Actor.createProxyConfiguration({ useApifyProxy: true });
+        return proxy === undefined;
+    });
+
+    await check('Actor.createProxyConfiguration (Apify proxy options only)', async () => {
+        const proxy = await Actor.createProxyConfiguration({
+            groups: ['RESIDENTIAL'],
+            countryCode: 'US',
+        });
+        return proxy === undefined;
+    });
+
+    await check('Actor.createProxyConfiguration (mixed Apify + custom throws)', async () => {
+        try {
+            await Actor.createProxyConfiguration({
+                groups: ['RESIDENTIAL'],
+                proxyUrls: ['http://user:pass@proxy.example.com:8080'],
+            });
+            return { ok: false, reason: 'expected throw' };
+        } catch (err) {
+            const message = (err as Error).message;
+            return {
+                ok: message.includes('Cannot combine Apify Proxy options'),
+                message,
+            };
+        }
+    });
+
+    const normalizationProxyUrls = input.proxyUrls?.length
+        ? input.proxyUrls
+        : ['http://user:pass@proxy1.example.com:8080', 'http://user:pass@proxy2.example.com:8080'];
+
+    await check('Actor.createProxyConfiguration (input schema normalization)', async () => {
+        const proxy = await Actor.createProxyConfiguration({
+            apifyProxyGroups: ['RESIDENTIAL'],
+            apifyProxyCountry: 'US',
+            proxyUrls: normalizationProxyUrls,
+            checkAccess: false,
+        });
+        if (!proxy) {
+            return { ok: false, reason: 'proxy configuration is undefined' };
+        }
+        const url = await proxy.newUrl('norm-session');
+        return {
+            ok: !!url && normalizationProxyUrls.includes(url),
+            url,
+        };
+    });
+
+    await check('Actor.createProxyConfiguration (wrapper API surface)', async () => {
+        const proxy = await Actor.createProxyConfiguration({
+            proxyUrls: normalizationProxyUrls,
+            checkAccess: false,
+        });
+        if (!proxy) {
+            return { ok: false, reason: 'proxy configuration is undefined' };
+        }
+        const hasConfig = proxy.config != null && typeof proxy.config.get === 'function';
+        const initResult = await proxy.initialize({ checkAccess: false });
+        const url = await proxy.newUrl('wrapper-session');
+        const info = await proxy.newProxyInfo('wrapper-session');
+        return {
+            ok: hasConfig && initResult === true && !!url && !!info?.url,
+            hasConfig,
+            initResult,
+            isManInTheMiddle: proxy.isManInTheMiddle,
+        };
+    });
+
+    await check('Actor.createProxyConfiguration (session stickiness)', async () => {
+        const stickyUrls = [
+            'http://user:pass@proxy-a.example.com:8080',
+            'http://user:pass@proxy-b.example.com:8080',
+        ];
+        const proxy = await Actor.createProxyConfiguration({
+            proxyUrls: stickyUrls,
+            checkAccess: false,
+        });
+        if (!proxy) {
+            return { ok: false, reason: 'proxy configuration is undefined' };
+        }
+        const url1 = await proxy.newUrl('sticky-session-1');
+        const url2 = await proxy.newUrl('sticky-session-1');
+        const url3 = await proxy.newUrl('sticky-session-2');
+        return {
+            ok: url1 === url2 && url1 !== url3,
+            url1,
+            url2,
+            url3,
+        };
+    });
+
+    await check('Actor.createProxyConfiguration (tieredProxyConfig)', async () => {
+        const proxy = await Actor.createProxyConfiguration({
+            tieredProxyConfig: [
+                { proxyUrls: ['http://user:pass@tier0.example.com:8080'] },
+                { proxyUrls: ['http://user:pass@tier1.example.com:8080'] },
+            ],
+            checkAccess: false,
+        });
+        if (!proxy) {
+            return { ok: false, reason: 'proxy configuration is undefined' };
+        }
+        const url = await proxy.newUrl('tier-session');
+        return {
+            ok: url === 'http://user:pass@tier0.example.com:8080',
+            url,
+        };
+    });
+
     if (input.targetActorId) {
         const routing = apiRoutingSnapshot();
         const startPreview = actorStartRequestPreview(
