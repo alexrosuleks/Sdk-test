@@ -15,12 +15,20 @@
  * Request-queue-only mode (skips all other SDK checks and end-of-run abort/metamorph/reboot):
  * { "testRequestQueue": true, "testRequestQueueReboot": true }
  *
+ * ChargingManager-only mode (all CM.* checks; PPE live tests need chargeEventName in actor pricing):
+ * {
+ *   "testChargingManager": true,
+ *   "chargeEventName": "my-event",
+ *   "testChargeBudgetLimits": false
+ * }
+ *
  * Abort smoke: set skipDestructive to false. By default the smoke run aborts itself
  * after OUTPUT is written (current run id from config/env). Optional abortTargetRunId
  * aborts another run instead.
  */
 
 import { Actor, Configuration, PlatformEventManager } from 'scrapely';
+import { runChargingManagerSmokeSuite } from './charging-manager-smoke.ts';
 import { runRequestQueueSmokeSuite } from './request-queue-smoke.ts';
 
 /** Apify-compatible instance (options env vars override at runtime on platform). */
@@ -66,6 +74,10 @@ interface SmokeInput {
     testRequestQueueReboot?: boolean;
     /** Named queue for shared/dual-consumer tests (default: sdk-smoke-rq-shared). */
     requestQueueSharedName?: string;
+    /** Run only ChargingManager smoke tests (skips all other SDK checks). */
+    testChargingManager?: boolean;
+    /** Within CM-only mode: test partial charge when count exceeds remaining budget. */
+    testChargeBudgetLimits?: boolean;
 }
 
 const results: SmokeCheck[] = [];
@@ -204,6 +216,36 @@ await Actor.main(async () => {
             }
             console.log('[sdk-smoke-rq] Request queue smoke complete', summary);
         }
+        return;
+    }
+
+    if (input.testChargingManager) {
+        await runChargingManagerSmokeSuite(input, {
+            currentRunId,
+            smokeActor,
+            results,
+            check,
+            skip,
+        });
+
+        const summary: Record<string, unknown> = {
+            mode: 'charging-manager-only',
+            currentRunId,
+            passed: results.filter((r) => r.status === 'ok').length,
+            failed: results.filter((r) => r.status === 'fail').length,
+            skipped: results.filter((r) => r.status === 'skip').length,
+            checks: results,
+        };
+
+        await Actor.pushData(results);
+        await Actor.setValue('OUTPUT', summary);
+
+        const failed = results.filter((r) => r.status === 'fail');
+        if (failed.length > 0) {
+            console.log('[sdk-smoke-cm] Some checks failed:', failed.map((f) => f.method).join(', '));
+            throw new Error(`ChargingManager smoke failed: ${failed.map((f) => f.method).join(', ')}`);
+        }
+        console.log('[sdk-smoke-cm] ChargingManager smoke complete', summary);
         return;
     }
 
@@ -406,11 +448,7 @@ await Actor.main(async () => {
         return { itemCount: items.length };
     });
 
-    await check('Actor.pushData with eventName (returns ChargeResult)', async () => {
-        // This test is conditional on pay-per-event, so we mark it not required
-        // It's already tested below with the chargeEventName condition
-        return { note: 'tested conditionally with chargeEventName input' };
-    }, false);
+    await skip('ChargingManager', 'use testChargingManager: true for comprehensive CM.* checks');
 
     // ============================================
     // Actor.openDataset comprehensive tests
@@ -919,90 +957,6 @@ await Actor.main(async () => {
         }
         return { ok: true, statusMessage: run.statusMessage, id: run.id ?? null };
     });
-
-    await check('Actor.getChargingManager', async () => {
-        const manager = Actor.getChargingManager();
-        return manager.getPricingInfo();
-    });
-
-    await check('ChargingManager.calculatePushDataLimits', async () => {
-        const manager = Actor.getChargingManager();
-        const pricingInfo = manager.getPricingInfo();
-
-        // Test with array of items
-        const items = [{ id: 1 }, { id: 2 }, { id: 3 }];
-        // Ensure eventName is a string (not undefined) for the test
-        const testEventName: string = input.chargeEventName || 'test-event';
-        const result = manager.calculatePushDataLimits({
-            eventName: testEventName,
-            isDefaultDataset: true,
-            items,
-        });
-
-        // Verify return shape
-        if (!('eventsToCharge' in result) || !('limitedItems' in result)) {
-            return { ok: false, reason: 'missing expected keys', result };
-        }
-
-        // For non-PPE or no event, should return all items
-        if (!pricingInfo.isPayPerEvent || !input.chargeEventName) {
-            if (result.limitedItems.length !== items.length) {
-                return { ok: false, reason: 'should return all items when not PPE or no event', result };
-            }
-            if (Object.keys(result.eventsToCharge).length !== 0) {
-                return { ok: false, reason: 'should have no events to charge when not PPE', result };
-            }
-        }
-
-        return {
-            hasMethod: true,
-            eventsToCharge: result.eventsToCharge,
-            limitedItemsCount: result.limitedItems.length,
-            isPayPerEvent: pricingInfo.isPayPerEvent,
-        };
-    });
-
-    await check('smokeActor.charge (instance method)', async () => typeof smokeActor.charge === 'function');
-
-    const chargePricing = Actor.getChargingManager().getPricingInfo();
-    if (input.chargeEventName && chargePricing.isPayPerEvent) {
-        await check('Actor.charge', async () => {
-            const result = await Actor.charge({ eventName: input.chargeEventName!, count: 1 });
-            if (typeof result.chargedCount !== 'number') {
-                return { ok: false, reason: 'missing chargedCount' };
-            }
-            if (result.chargedCount < 0 || result.chargedCount > 1) {
-                return {
-                    ok: false,
-                    reason: 'unexpected chargedCount for count=1',
-                    chargedCount: result.chargedCount,
-                };
-            }
-            return {
-                ok: true,
-                chargedCount: result.chargedCount,
-                eventChargeLimitReached: result.eventChargeLimitReached,
-                chargeableWithinLimit: result.chargeableWithinLimit,
-            };
-        });
-        await check(
-            'Actor.pushData with eventName',
-            async () => {
-                const result = await Actor.pushData({ charged: true }, input.chargeEventName);
-                return {
-                    chargedCount: result.chargedCount,
-                    eventChargeLimitReached: result.eventChargeLimitReached,
-                };
-            },
-            false,
-        );
-    } else if (input.chargeEventName) {
-        await skip('Actor.charge', 'chargeEventName set but actor is not pay-per-event');
-        await skip('Actor.pushData(eventName)', 'chargeEventName set but actor is not pay-per-event');
-    } else {
-        await skip('Actor.charge', 'no chargeEventName in input');
-        await skip('Actor.pushData(eventName)', 'no chargeEventName in input');
-    }
 
     // Test: createProxyConfiguration with no options returns undefined
     await check('Actor.createProxyConfiguration (no options)', async () => {

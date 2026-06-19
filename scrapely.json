@@ -4,5 +4,5 @@
   "entrypoint": "main.ts",
   "maxMemory": 512,
   "maxTimeout": 600,
-  "description": "Platform integration smoke test for the Scrapely Actor SDK. Set testRequestQueue: true to run only request-queue checks (optional testRequestQueueReboot for reboot persistence)."
+  "description": "Platform integration smoke test for the Scrapely Actor SDK. Set testRequestQueue: true for request-queue-only checks (optional testRequestQueueReboot). Set testChargingManager: true for ChargingManager-only checks (chargeEventName required for PPE live billing; optional testChargeBudgetLimits)."
 }
