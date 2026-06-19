@@ -1060,20 +1060,21 @@ await Actor.main(async () => {
         return proxy === undefined;
     });
 
-    await check('Actor.createProxyConfiguration (mixed Apify + custom throws)', async () => {
-        try {
-            await Actor.createProxyConfiguration({
-                groups: ['RESIDENTIAL'],
-                proxyUrls: ['http://user:pass@proxy.example.com:8080'],
-            });
-            return { ok: false, reason: 'expected throw' };
-        } catch (err) {
-            const message = (err as Error).message;
-            return {
-                ok: message.includes('Cannot combine Apify Proxy options'),
-                message,
-            };
+    await check('Actor.createProxyConfiguration (mixed Apify + custom, proxyUrls wins)', async () => {
+        const proxy = await Actor.createProxyConfiguration({
+            groups: ['RESIDENTIAL'],
+            countryCode: 'US',
+            proxyUrls: ['http://user:pass@proxy.example.com:8080'],
+            checkAccess: false,
+        });
+        if (!proxy) {
+            return { ok: false, reason: 'expected proxy configuration when proxyUrls provided' };
         }
+        const url = await proxy.newUrl('mixed-session');
+        return {
+            ok: url === 'http://user:pass@proxy.example.com:8080',
+            url,
+        };
     });
 
     const normalizationProxyUrls = input.proxyUrls?.length

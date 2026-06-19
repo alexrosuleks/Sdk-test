@@ -1,6 +1,10 @@
 /**
  * Isolated ChargingManager smoke suite (enabled via input.testChargingManager).
  * Exercises all Apify-compatible ChargingManager methods on the platform.
+ *
+ * When the run has no maxTotalChargeUsd cap, calculateMaxEventChargeCountWithinLimit
+ * correctly returns Infinity (unlimited). Set maxTotalChargeUsd on the run plus
+ * testChargeBudgetLimits: true to exercise finite-remaining / partial-fulfillment paths.
  */
 
 import {
@@ -38,11 +42,20 @@ function getManager() {
     return Actor.getChargingManager();
 }
 
+function hasBudgetCap(pricing: ActorPricingInfo): boolean {
+    return Number.isFinite(pricing.maxTotalChargeUsd);
+}
+
+function formatRemaining(value: number): number | string {
+    return value === Infinity ? 'Infinity' : value;
+}
+
 function pricingSnapshot(pricing: ActorPricingInfo) {
     return {
         pricingModel: pricing.pricingModel ?? null,
         isPayPerEvent: pricing.isPayPerEvent,
-        maxTotalChargeUsd: pricing.maxTotalChargeUsd,
+        maxTotalChargeUsd: formatRemaining(pricing.maxTotalChargeUsd),
+        budgetCapped: hasBudgetCap(pricing),
         perEventPrices: pricing.perEventPrices,
         eventNames: Object.keys(pricing.perEventPrices),
     };
@@ -129,7 +142,7 @@ async function readOnlyChecks(ctx: ChargingManagerSmokeContext, input: ChargingM
         if (remaining !== Infinity) {
             return { ok: false, reason: 'unregistered event should return Infinity', remaining };
         }
-        return { remaining };
+        return { remaining: formatRemaining(remaining) };
     });
 
     await check('CM.calculatePushDataLimits.shape', async () => {
@@ -196,13 +209,32 @@ async function readOnlyChecks(ctx: ChargingManagerSmokeContext, input: ChargingM
     if (pricing.isPayPerEvent && eventName && eventName in pricing.perEventPrices) {
         await check('CM.calculateMaxEventChargeCountWithinLimit.known', async () => {
             const remaining = manager.calculateMaxEventChargeCountWithinLimit(eventName);
-            if (typeof remaining !== 'number' || remaining < 0) {
-                return { ok: false, reason: 'expected finite non-negative number', remaining };
+            const budgetCapped = hasBudgetCap(pricing);
+
+            if (typeof remaining !== 'number' || (remaining < 0 && remaining !== Infinity)) {
+                return {
+                    ok: false,
+                    reason: 'expected non-negative number or Infinity',
+                    remaining: formatRemaining(remaining),
+                };
             }
-            if (!Number.isFinite(remaining)) {
-                return { ok: false, reason: 'expected finite number for priced event', remaining };
+            if (budgetCapped && !Number.isFinite(remaining)) {
+                return {
+                    ok: false,
+                    reason: 'expected finite number when budget is capped',
+                    remaining: formatRemaining(remaining),
+                    budgetCapped,
+                };
             }
-            return { eventName, remaining };
+            if (!budgetCapped && remaining !== Infinity) {
+                return {
+                    ok: false,
+                    reason: 'expected Infinity when no budget cap is set',
+                    remaining: formatRemaining(remaining),
+                    budgetCapped,
+                };
+            }
+            return { eventName, remaining: formatRemaining(remaining), budgetCapped };
         });
     } else if (!pricing.isPayPerEvent) {
         await skip('CM.calculateMaxEventChargeCountWithinLimit.known', 'actor is not pay-per-event');
@@ -348,19 +380,51 @@ async function ppeLiveChecks(ctx: ChargingManagerSmokeContext, input: ChargingMa
 
     await check('CM.calculateMaxEventChargeCountWithinLimit.afterCharge', async () => {
         const remainingAfter = manager.calculateMaxEventChargeCountWithinLimit(eventName);
+        const budgetCapped = hasBudgetCap(pricing);
+
         if (!chargeResult || chargeResult.chargedCount <= 0) {
-            return { remainingBefore, remainingAfter, note: 'no charge applied' };
+            return {
+                remainingBefore: formatRemaining(remainingBefore),
+                remainingAfter: formatRemaining(remainingAfter),
+                note: 'no charge applied',
+            };
         }
+
+        if (!budgetCapped) {
+            return {
+                remainingBefore: formatRemaining(remainingBefore),
+                remainingAfter: formatRemaining(remainingAfter),
+                budgetCapped,
+                note: 'unlimited budget — remaining stays Infinity',
+            };
+        }
+
+        if (!Number.isFinite(remainingBefore) || !Number.isFinite(remainingAfter)) {
+            return {
+                ok: false,
+                reason: 'expected finite remaining counts when budget is capped',
+                remainingBefore: formatRemaining(remainingBefore),
+                remainingAfter: formatRemaining(remainingAfter),
+                budgetCapped,
+            };
+        }
+
         if (remainingAfter >= remainingBefore) {
             return {
                 ok: false,
                 reason: 'remaining budget should decrease after charge',
-                remainingBefore,
-                remainingAfter,
+                remainingBefore: formatRemaining(remainingBefore),
+                remainingAfter: formatRemaining(remainingAfter),
                 chargedCount: chargeResult.chargedCount,
+                budgetCapped,
             };
         }
-        return { remainingBefore, remainingAfter };
+
+        return {
+            remainingBefore: formatRemaining(remainingBefore),
+            remainingAfter: formatRemaining(remainingAfter),
+            budgetCapped,
+        };
     });
 
     await check('CM.smokeActor.charge.instance', async () => {
@@ -443,6 +507,11 @@ async function budgetLimitChecks(ctx: ChargingManagerSmokeContext, input: Chargi
         return;
     }
 
+    if (!hasBudgetCap(pricing)) {
+        await skip('CM.charge.partialFulfillment', 'requires run-level maxTotalChargeUsd budget cap');
+        return;
+    }
+
     const remaining = manager.calculateMaxEventChargeCountWithinLimit(eventName);
     if (!Number.isFinite(remaining) || remaining <= 0) {
         await skip('CM.charge.partialFulfillment', 'no remaining budget for partial-fulfillment test');
@@ -459,7 +528,7 @@ async function budgetLimitChecks(ctx: ChargingManagerSmokeContext, input: Chargi
                 reason: 'expected partial fulfillment when count exceeds remaining budget',
                 requestCount,
                 chargedCount: result.chargedCount,
-                remainingBefore: remaining,
+                remainingBefore: formatRemaining(remaining),
             };
         }
         if (result.chargedCount <= 0) {
@@ -468,13 +537,13 @@ async function budgetLimitChecks(ctx: ChargingManagerSmokeContext, input: Chargi
                 reason: 'expected at least one charge when budget remains',
                 requestCount,
                 chargedCount: result.chargedCount,
-                remainingBefore: remaining,
+                remainingBefore: formatRemaining(remaining),
             };
         }
         return {
             requestCount,
             chargedCount: result.chargedCount,
-            remainingBefore: remaining,
+            remainingBefore: formatRemaining(remaining),
             partial: result.chargedCount < requestCount,
         };
     });
