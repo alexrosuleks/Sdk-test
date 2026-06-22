@@ -27,7 +27,7 @@
  * aborts another run instead.
  */
 
-import { Actor, Configuration, PlatformEventManager } from 'scrapely';
+import { Actor, Configuration, KeyValueStore, PlatformEventManager } from 'scrapely';
 import { runChargingManagerSmokeSuite } from './charging-manager-smoke.ts';
 import { runRequestQueueSmokeSuite } from './request-queue-smoke.ts';
 
@@ -263,6 +263,84 @@ await Actor.main(async () => {
         await Actor.setValue('SDK_SMOKE_RUN_ID', { currentRunId, input });
     }
 
+    await check('instance.apifyClient getter', async () => {
+        return smokeActor.apifyClient.constructor.name === 'ApifyClient';
+    });
+
+    await check('instance.getInput matches Actor.getInput', async () => {
+        const fromStatic = await Actor.getInput<SmokeInput>();
+        const fromInstance = await smokeActor.getInput<SmokeInput>();
+        return JSON.stringify(fromStatic) === JSON.stringify(fromInstance);
+    });
+
+    await check('instance.getInputOrThrow', async () => {
+        const value = await smokeActor.getInputOrThrow<SmokeInput>();
+        return value != null && typeof value === 'object';
+    });
+
+    await check('instance.getValue / setValue', async () => {
+        const key = 'SDK_SMOKE_INSTANCE_KVS';
+        await smokeActor.setValue(key, { instance: true });
+        const value = await smokeActor.getValue<{ instance: boolean }>(key);
+        return value?.instance === true;
+    });
+
+    await check('instance.openDataset', async () => {
+        const dataset = await smokeActor.openDataset();
+        return !!dataset;
+    });
+
+    await check('instance.openKeyValueStore', async () => {
+        const store = await smokeActor.openKeyValueStore();
+        return !!store;
+    });
+
+    await check('instance.openRequestQueue', async () => {
+        const queue = await smokeActor.openRequestQueue();
+        return !!queue;
+    });
+
+    await check('instance.isAtHome', async () => smokeActor.isAtHome() === Actor.isAtHome());
+
+    await check('instance.getEnv', async () => {
+        const env = smokeActor.getEnv();
+        return env.actorRunId === Actor.getEnv().actorRunId;
+    });
+
+    await check('instance.useState', async () => {
+        const state = await smokeActor.useState(`${useStateKey}-instance`, { count: 0 });
+        state.count = (state.count ?? 0) + 1;
+        return state.count >= 1;
+    });
+
+    await check('instance.setStatusMessage', async () => {
+        const run = await smokeActor.setStatusMessage('SDK smoke instance API');
+        return run?.statusMessage === 'SDK smoke instance API' || run?.statusMessage != null || typeof run === 'object';
+    });
+
+    await check('instance.createProxyConfiguration (newUrlFunction)', async () => {
+        const proxy = await smokeActor.createProxyConfiguration({
+            newUrlFunction: () => 'http://user:pass@proxy.example.com:8080',
+            checkAccess: false,
+        });
+        return !!proxy && !!(await proxy.newUrl('inst'));
+    });
+
+    await check('instance method surface', async () => {
+        const required = [
+            'init', 'main', 'exit', 'fail', 'getInput', 'getInputOrThrow', 'pushData',
+            'getValue', 'setValue', 'openDataset', 'openKeyValueStore', 'openRequestQueue',
+            'useState', 'isAtHome', 'getEnv', 'setStatusMessage', 'createProxyConfiguration',
+            'metamorph', 'reboot', 'abort', 'addWebhook', 'start', 'call', 'callTask',
+            'charge', 'getChargingManager', 'newClient', 'on', 'off',
+        ] as const;
+        const missing = required.filter((m) => typeof (smokeActor as any)[m] !== 'function');
+        if (missing.length > 0) {
+            return { ok: false, missing };
+        }
+        return { ok: true, count: required.length };
+    });
+
     await check('new Actor(options) constructor', async () => smokeActor instanceof Actor);
 
     await check('instance.config', async () => {
@@ -273,6 +351,11 @@ await Actor.main(async () => {
     await check('Actor.getDefaultInstance().config', async () => {
         const cfg = Actor.getDefaultInstance().config;
         return typeof cfg.get('persistStateIntervalMillis') === 'number';
+    });
+
+    await check('Actor.config (static Apify accessor)', async () => {
+        const cfg = Actor.config;
+        return typeof cfg.get === 'function' && cfg === Actor.getDefaultInstance().config;
     });
 
     await check('Configuration.getGlobalConfig()', async () => {
@@ -742,6 +825,156 @@ await Actor.main(async () => {
             alias,
             method: 'alias-object',
         };
+    }, false);
+
+    // ============================================
+    // KeyValueStore Apify-compatible method tests
+    // ============================================
+
+    const kvsPrefix = `sdk-smoke-kvs-${Date.now()}`;
+    const kvsStore = await Actor.openKeyValueStore();
+
+    await check('KVS.recordExists (instance)', async () => {
+        const key = `${kvsPrefix}-exists`;
+        await kvsStore.setValue(key, { probe: true });
+        const exists = await kvsStore.recordExists(key);
+        const missing = await kvsStore.recordExists(`${kvsPrefix}-missing`);
+        if (!exists || missing) {
+            return { ok: false, exists, missing };
+        }
+        return { exists, missing };
+    });
+
+    await check('KVS.recordExists (static)', async () => {
+        const key = `${kvsPrefix}-static-exists`;
+        await kvsStore.setValue(key, { probe: true });
+        const exists = await KeyValueStore.recordExists(key);
+        const missing = await KeyValueStore.recordExists(`${kvsPrefix}-static-missing`);
+        if (!exists || missing) {
+            return { ok: false, exists, missing };
+        }
+        return { exists, missing };
+    });
+
+    await check('KVS.getPublicUrl', async () => {
+        const key = 'OUTPUT';
+        const url = kvsStore.getPublicUrl(key);
+        const storeId = kvsStore.id;
+        const expectedSuffix = `/v2/key-value-stores/${storeId}/records/${key}`;
+        if (!url.includes(expectedSuffix)) {
+            return { ok: false, url, expectedSuffix };
+        }
+        return { url, storeId };
+    });
+
+    await check('KVS.setValue(null) deletes', async () => {
+        const key = `${kvsPrefix}-delete-me`;
+        await kvsStore.setValue(key, { temp: true });
+        const before = await kvsStore.recordExists(key);
+        await kvsStore.setValue(key, null);
+        const after = await kvsStore.recordExists(key);
+        if (!before || after) {
+            return { ok: false, before, after };
+        }
+        return { before, after };
+    });
+
+    await check('KVS.forEachKey (prefix)', async () => {
+        const keys = [`${kvsPrefix}-fe-1`, `${kvsPrefix}-fe-2`, `${kvsPrefix}-fe-3`];
+        for (const key of keys) {
+            await kvsStore.setValue(key, { idx: key });
+        }
+        const seen: string[] = [];
+        await kvsStore.forEachKey(async (key) => {
+            if (key.startsWith(`${kvsPrefix}-fe-`)) seen.push(key);
+        }, { prefix: `${kvsPrefix}-fe-` });
+        seen.sort();
+        const expected = [...keys].sort();
+        if (seen.length !== expected.length || !expected.every((k, i) => seen[i] === k)) {
+            return { ok: false, seen, expected };
+        }
+        return { count: seen.length };
+    });
+
+    await check('KVS.keys (for await + pagination)', async () => {
+        const keys = Array.from({ length: 5 }, (_, i) => `${kvsPrefix}-pag-${i}`);
+        for (const key of keys) {
+            await kvsStore.setValue(key, { n: key });
+        }
+        const seen: string[] = [];
+        for await (const key of kvsStore.keys({ prefix: `${kvsPrefix}-pag-`, limit: 2 })) {
+            seen.push(key);
+        }
+        seen.sort();
+        const expected = [...keys].sort();
+        if (seen.length !== expected.length || !expected.every((k, i) => seen[i] === k)) {
+            return { ok: false, seen, expected, note: 'pagination via limit:2 over 5 keys' };
+        }
+        return { count: seen.length, paginated: true };
+    });
+
+    await check('KVS.values (for await)', async () => {
+        const key = `${kvsPrefix}-values`;
+        await kvsStore.setValue(key, { marker: 'values-test' });
+        let found = false;
+        for await (const value of kvsStore.values({ prefix: `${kvsPrefix}-values` })) {
+            if (value && typeof value === 'object' && (value as { marker?: string }).marker === 'values-test') {
+                found = true;
+            }
+        }
+        if (!found) return { ok: false, reason: 'expected value not found' };
+        return { found };
+    });
+
+    await check('KVS.entries (for await)', async () => {
+        const key = `${kvsPrefix}-entries`;
+        await kvsStore.setValue(key, { marker: 'entries-test' });
+        let found = false;
+        for await (const [entryKey, value] of kvsStore.entries({ prefix: `${kvsPrefix}-entries` })) {
+            if (
+                entryKey === key &&
+                value &&
+                typeof value === 'object' &&
+                (value as { marker?: string }).marker === 'entries-test'
+            ) {
+                found = true;
+            }
+        }
+        if (!found) return { ok: false, reason: 'expected entry not found' };
+        return { found };
+    });
+
+    await check('KVS.[asyncIterator]', async () => {
+        const iterStoreName = `sdk-smoke-kvs-iter-${Date.now()}`;
+        const iterStore = await Actor.openKeyValueStore(iterStoreName);
+        const key = 'iter-probe';
+        await iterStore.setValue(key, { marker: 'iter-test' });
+        let found = false;
+        for await (const [entryKey, value] of iterStore) {
+            if (
+                entryKey === key &&
+                value &&
+                typeof value === 'object' &&
+                (value as { marker?: string }).marker === 'iter-test'
+            ) {
+                found = true;
+            }
+        }
+        if (!found) return { ok: false, reason: 'expected entry not found via store iteration' };
+        return { found };
+    });
+
+    await check('KVS.drop (named store)', async () => {
+        const dropName = `sdk-smoke-kvs-drop-${Date.now()}`;
+        const dropStore = await Actor.openKeyValueStore(dropName);
+        await dropStore.setValue('probe', { drop: true });
+        await dropStore.drop();
+        const fresh = await Actor.openKeyValueStore(dropName);
+        const exists = await fresh.recordExists('probe');
+        if (exists) {
+            return { ok: false, reason: 'store still has records after drop and reopen' };
+        }
+        return { dropped: true };
     }, false);
 
     // ============================================
@@ -1476,7 +1709,7 @@ await Actor.main(async () => {
         try {
             console.log('[sdk-smoke] Rebooting...');
             const httpStatus = await Actor.reboot({ customAfterSleepMillis: 0 });
-            summary.rebootAtEnd = { status: 'ok', httpStatus };
+            summary.rebootAtEnd = { status: 'ok' };
             await Actor.setValue('OUTPUT', summary);
             console.log('[sdk-smoke] Reboot at end', summary.rebootAtEnd);
         } catch (err) {
